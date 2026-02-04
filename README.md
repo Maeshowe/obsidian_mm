@@ -215,6 +215,177 @@ If the baseline is missing:
 **This is a deliberate design choice.**
 
 ---
+
+### Worked Baseline Example
+
+**Building SPY's baseline over the first 30 trading days (cold start)**
+
+This example illustrates how OBSIDIAN MM constructs baselines forward in time using daily pipeline runs, and how it behaves before the minimum observation threshold is reached.
+
+---
+
+#### 1. Setup
+
+- Instrument: SPY
+- Rolling baseline window: W = 63
+- Minimum observations: N_min = 21
+- Baseline states: EMPTY → PARTIAL → COMPLETE
+
+Let t = 1,2,...,30 denote the first 30 trading days since onboarding SPY.
+
+---
+
+#### 2. What Gets Stored Each Day (Canonical History)
+
+Each day t, OBSIDIAN MM persists a feature row:
+
+```
+X_t = (DarkShare_t, GEX_t, DEX_t, BlockIntensity_t, IVSkew_t,
+       Efficiency_t, Impact_t, (optional: Vanna_t, Charm_t))
+```
+
+**Key point:** Some features may be unavailable due to provider lookback limits. For example:
+- Vanna/Charm may be present only for the last ~7 days from the API, therefore baseline must be built incrementally from stored history.
+
+If a feature is missing on day t, it is recorded as missing, not replaced.
+
+---
+
+#### 3. Days 1–20: Baseline Not Yet Valid (BASELINE_EMPTY / PARTIAL)
+
+For t < 21:
+
+```
+n_X(t) < N_min
+```
+
+where n_X(t) is the count of stored observations for feature X up to day t.
+
+**System behavior:**
+- Unusualness score: not computed (or shown as NaN / unavailable)
+- Regime label: UNDETERMINED (or computed only from features with sufficient baseline)
+- Explainability text must state baseline status:
+
+> "Baseline insufficient (<21 observations). Diagnosis withheld."
+
+This prevents false confidence during cold start.
+
+---
+
+#### 4. Day 21: Baseline Becomes Usable for Eligible Features
+
+At day t = 21, for any feature X with complete history:
+
+```
+n_X(21) ≥ 21
+```
+
+OBSIDIAN MM can now compute baseline parameters:
+
+```
+μ_X(21) = (1/21) × Σ_{k=1}^{21} X_k
+σ_X(21) = sqrt((1/20) × Σ_{k=1}^{21} (X_k - μ_X(21))²)
+```
+
+and quantiles Q_X if needed.
+
+From this point:
+- DarkShare baseline ✓
+- GEX baseline ✓
+- DEX baseline ✓
+- Efficiency/Impact baseline ✓
+- Anything with missing history may still be excluded
+
+Therefore baseline state is typically: **BASELINE_PARTIAL**
+
+---
+
+#### 5. Z-Scores Start on Day 21 (Feature-by-Feature)
+
+For each eligible feature X, the normalized value becomes:
+
+```
+Z_X(t) = (X_t - μ_X(t)) / σ_X(t)   for n_X(t) ≥ 21
+```
+
+**Important:** If n_X(t) < 21, then Z_X(t) is undefined and must not be used.
+
+---
+
+#### 6. Days 22–30: Baseline Strengthens, But Remains Short-Window
+
+During t = 22...30:
+- Baseline uses the first t observations until it reaches W = 63
+- Parameters update with each day (rolling expansion phase)
+
+For t ≤ 63:
+
+```
+μ_X(t) = (1/t) × Σ_{k=1}^{t} X_k
+σ_X(t) = sqrt((1/(t-1)) × Σ_{k=1}^{t} (X_k - μ_X(t))²)
+```
+
+After t > 63, the system transitions to a rolling window.
+
+---
+
+#### 7. What About Vanna/Charm with Short API Lookback?
+
+Suppose Vanna is available only from day 24 onward (because the API only offers ~7 days history at onboarding).
+
+Then:
+
+```
+n_Vanna(30) = 7 < 21
+```
+
+So:
+- Vanna baseline is not computed
+- Vanna is excluded from scoring/classification
+- Explainability includes: *"Vanna/Charm excluded due to insufficient stored history."*
+
+After ~3 weeks of running daily: n_Vanna ≥ 21 and Vanna/Charm becomes eligible for inclusion.
+
+---
+
+#### 8. What the User Should See on Day 30
+
+By day 30:
+- **Many baselines are valid:** DarkShare, GEX, DEX, price efficiency/impact
+- **Some may remain invalid:** Vanna/Charm (often), depending on availability
+
+So the baseline state is commonly: **BASELINE_PARTIAL**
+
+And outputs should look like:
+- **Regime:** computed only if regime rules rely on eligible features (otherwise UNDETERMINED)
+- **Unusualness score:** computed from the subset of available normalized components:
+
+```
+S_t = Σ_{k ∈ F_t} w_k |Z_{k,t}|
+```
+
+where F_t is the set of features with valid baseline at time t.
+
+Score is then mapped to percentile rank over available history:
+
+```
+U_t = PercentileRank(S_t | S_{1:t})
+```
+
+with the understanding that percentile meaning stabilizes as t grows.
+
+---
+
+#### 9. Key Takeaways (Why This Matters)
+
+- Baselines are **built forward, never backfilled**
+- The system is allowed to say: *"I don't know yet."*
+- A baseline is not "born complete"; it **matures**
+- Early days are for **data accumulation**, not diagnosis
+
+**This is a deliberate design choice to prevent false confidence.**
+
+---
 ---
 
 ## Quantitative Specification
