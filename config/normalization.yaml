@@ -1,0 +1,206 @@
+# OBSIDIAN MM - Normalization Configuration
+# Defines rolling windows, methods, and parameters for feature normalization
+
+# Philosophy note:
+# Normalization is MANDATORY. Absolute values are meaningless without context.
+# All features must be expressed relative to their historical distribution.
+
+normalization:
+  # Default rolling window (trading days)
+  # 63 days ≈ 3 months, balances stability with regime sensitivity
+  default_window: 63
+
+  # Minimum observations required before normalization
+  # 21 days ≈ 1 month, ensures statistical significance
+  min_observations: 21
+
+  # Feature-specific configurations
+  # Each feature can override the default method and window
+  features:
+    # ==========================================
+    # DARK POOL FEATURES
+    # ==========================================
+
+    dark_pool_ratio:
+      description: "Dark pool volume as percentage of total volume"
+      method: percentile
+      window: 63
+      # Clip extreme values to prevent outlier distortion
+      clip_outliers: true
+      outlier_std: 3.0
+
+    dark_pool_volume:
+      description: "Absolute dark pool share volume"
+      method: zscore
+      window: 63
+      # Log-transform before z-score for skewed distributions
+      log_transform: true
+
+    block_trade_count:
+      description: "Number of block trades (>10k shares)"
+      method: percentile
+      window: 63
+
+    block_trade_size_avg:
+      description: "Average size of block trades"
+      method: zscore
+      window: 63
+
+    block_premium:
+      description: "Total notional value of block trades"
+      method: zscore
+      window: 63
+      log_transform: true
+
+    # ==========================================
+    # GREEK EXPOSURE FEATURES
+    # ==========================================
+
+    gex:
+      description: "Gamma exposure - dealer gamma positioning"
+      method: zscore
+      window: 63
+      # Sign matters: positive = long gamma, negative = short gamma
+      preserve_sign: true
+
+    dex:
+      description: "Delta exposure - dealer delta positioning"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    vanna:
+      description: "Vanna - dDelta/dIV sensitivity"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    charm:
+      description: "Charm - dDelta/dTime decay"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    # ==========================================
+    # IV & SKEW FEATURES
+    # ==========================================
+
+    iv_atm:
+      description: "At-the-money implied volatility"
+      method: percentile
+      # Use 252 days (1 year) for IV to capture full cycles
+      window: 252
+
+    iv_rank:
+      description: "IV rank (current IV vs 52-week range)"
+      method: passthrough
+      # Already normalized to 0-100 by definition
+
+    iv_skew:
+      description: "Put-call IV skew (25d put IV - 25d call IV)"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    iv_term_slope:
+      description: "Term structure slope (30d IV - 7d IV)"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    # ==========================================
+    # FLOW FEATURES
+    # ==========================================
+
+    call_volume:
+      description: "Total call option volume"
+      method: zscore
+      window: 63
+      log_transform: true
+
+    put_volume:
+      description: "Total put option volume"
+      method: zscore
+      window: 63
+      log_transform: true
+
+    call_put_ratio:
+      description: "Call/put volume ratio"
+      method: zscore
+      window: 63
+
+    net_premium:
+      description: "Net premium (call premium - put premium)"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+    # ==========================================
+    # PRICE CONTEXT FEATURES
+    # ==========================================
+
+    price_change_pct:
+      description: "Daily price change percentage"
+      method: passthrough
+      # Keep as raw percentage for regime rules
+
+    daily_range_pct:
+      description: "Daily range as percentage of open"
+      method: percentile
+      window: 63
+
+    volume_vs_avg:
+      description: "Volume relative to 20-day average"
+      method: passthrough
+      # Already a ratio
+
+    # ==========================================
+    # GAMMA CONTEXT FEATURES (for regime validation)
+    # ==========================================
+
+    price_efficiency:
+      description: "Daily range / volume (lower = more controlled)"
+      method: percentile
+      window: 63
+      # Used to validate Gamma+ regime
+
+    impact_per_vol:
+      description: "|price change| / volume (higher = more vacuum)"
+      method: percentile
+      window: 63
+      # Used to validate Gamma- regime
+
+    # ==========================================
+    # VENUE MIX FEATURES
+    # ==========================================
+
+    venue_shift:
+      description: "Day-over-day change in dark pool ratio"
+      method: zscore
+      window: 63
+      preserve_sign: true
+
+  # Composite score normalization
+  # The final unusualness score is normalized to 0-100
+  unusualness_score:
+    output_range: [0, 100]
+    method: percentile_rank
+    window: 63
+
+# Normalization methods reference:
+#
+# zscore:       (x - rolling_mean) / rolling_std
+#               Output: unbounded, centered at 0
+#               Use for: directional metrics where sign matters
+#
+# percentile:   rolling_rank(x) / window_size * 100
+#               Output: 0-100
+#               Use for: bounded metrics, comparing to history
+#
+# passthrough:  x (no transformation)
+#               Output: unchanged
+#               Use for: pre-normalized or ratio metrics
+#
+# minmax:       (x - rolling_min) / (rolling_max - rolling_min)
+#               Output: 0-1
+#               Use for: range normalization

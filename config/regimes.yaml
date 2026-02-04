@@ -1,0 +1,194 @@
+# OBSIDIAN MM - Regime Classification Configuration
+# Human-readable, deterministic regime definitions
+#
+# Philosophy:
+# - Each regime has explicit, auditable conditions
+# - Evaluated in PRIORITY ORDER (first match wins)
+# - No machine learning - pure rule-based logic
+# - Every regime includes an explanation template
+
+# Threshold definitions (central reference)
+# Modify these to tune regime sensitivity
+thresholds:
+  # Gamma extremes
+  gex_extreme_positive: 1.5      # z-score above which GEX is "high"
+  gex_extreme_negative: -1.5     # z-score below which GEX is "low"
+
+  # Delta extremes
+  dex_elevated: 1.0              # z-score for elevated delta exposure
+
+  # Dark pool thresholds
+  dark_pool_dominant: 70         # percentage for "dominant" dark pool
+  dark_pool_elevated: 50         # percentage for "elevated" dark pool
+
+  # Block activity
+  block_activity_elevated: 1.0   # z-score for elevated block activity
+
+  # Price stability range
+  price_stable_low: -0.5         # percent for "not falling"
+  price_stable_high: 0.5         # percent for "not rising"
+
+  # Gamma context validation (percentile thresholds)
+  price_efficiency_low: 50       # below median = controlled
+  impact_per_vol_high: 50        # above median = vacuum-like
+
+# Regime definitions
+# Evaluated in PRIORITY ORDER - first matching regime wins
+regimes:
+  # ================================================================
+  # PRIORITY 1: GAMMA EXTREMES (highest market-impact)
+  # ================================================================
+
+  gamma_positive_control:
+    label: "Gamma+ Control"
+    priority: 1
+    description: |
+      Dealers are long gamma. Market makers profit from mean reversion.
+      Expect dampened volatility and price pinning near strikes.
+    conditions:
+      - feature: gex_zscore
+        operator: ">"
+        threshold_ref: gex_extreme_positive
+      - feature: dark_pool_ratio_pct
+        operator: "<"
+        threshold: 60  # Not dark-dominant (would conflict)
+      # CRITICAL: Price efficiency validation
+      - feature: price_efficiency_pct
+        operator: "<"
+        threshold_ref: price_efficiency_low
+        note: "Low price efficiency confirms dealer control"
+    explanation_template: |
+      GEX z-score is {gex_zscore:.2f} (above +1.5 threshold), indicating
+      dealers are significantly long gamma. Price efficiency at
+      {price_efficiency_pct:.0f}th percentile confirms volatility suppression.
+      Dark pool ratio at {dark_pool_ratio_pct:.1f}% suggests lit market activity.
+      Expect price pinning near major strikes.
+
+  gamma_negative_vacuum:
+    label: "Gamma- Liquidity Vacuum"
+    priority: 2
+    description: |
+      Dealers are short gamma. Market makers must chase price moves.
+      Expect amplified volatility and potential for rapid moves.
+    conditions:
+      - feature: gex_zscore
+        operator: "<"
+        threshold_ref: gex_extreme_negative
+      # CRITICAL: Impact-per-volume validation
+      - feature: impact_per_vol_pct
+        operator: ">"
+        threshold_ref: impact_per_vol_high
+        note: "High impact confirms liquidity vacuum"
+    explanation_template: |
+      GEX z-score is {gex_zscore:.2f} (below -1.5 threshold), indicating
+      dealers are significantly short gamma. Impact-per-volume at
+      {impact_per_vol_pct:.0f}th percentile confirms liquidity vacuum.
+      This creates conditions where price moves may be amplified.
+      Top driver: {top_driver}.
+
+  # ================================================================
+  # PRIORITY 3: DARK POOL DOMINANCE (structural signal)
+  # ================================================================
+
+  dark_dominant_accumulation:
+    label: "Dark-Dominant Accumulation"
+    priority: 3
+    description: |
+      Unusual concentration of volume in dark pools with large block prints.
+      May indicate institutional accumulation away from lit venues.
+    conditions:
+      - feature: dark_pool_ratio_pct
+        operator: ">"
+        threshold_ref: dark_pool_dominant
+      - feature: block_trade_count_zscore
+        operator: ">"
+        threshold_ref: block_activity_elevated
+    explanation_template: |
+      Dark pool ratio is {dark_pool_ratio_pct:.1f}% (above 70% threshold) with
+      elevated block activity (z-score: {block_trade_count_zscore:.2f}).
+      This pattern suggests institutional accumulation occurring primarily
+      through off-exchange venues.
+
+  # ================================================================
+  # PRIORITY 4-5: DIRECTIONAL FLOW PATTERNS (interpretive)
+  # ================================================================
+
+  absorption_like:
+    label: "Absorption-like"
+    priority: 4
+    description: |
+      Pattern consistent with passive absorption of selling pressure.
+      Characterized by negative delta exposure with stable/rising price.
+    conditions:
+      - feature: dex_zscore
+        operator: "<"
+        threshold: -1.0  # Negative delta exposure
+      - feature: price_change_pct
+        operator: ">="
+        threshold_ref: price_stable_low
+        note: "Price not falling significantly"
+      - feature: dark_pool_ratio_pct
+        operator: ">"
+        threshold_ref: dark_pool_elevated
+        note: "Some dark pool activity"
+    explanation_template: |
+      Negative delta exposure (DEX z-score: {dex_zscore:.2f}) combined with
+      stable price action ({price_change_pct:+.2f}%) suggests passive buying
+      absorbing sell flow. Dark pool ratio: {dark_pool_ratio_pct:.1f}%.
+
+  distribution_like:
+    label: "Distribution-like"
+    priority: 5
+    description: |
+      Pattern consistent with distribution/selling into strength.
+      Characterized by positive delta exposure with declining/flat price.
+    conditions:
+      - feature: dex_zscore
+        operator: ">"
+        threshold_ref: dex_elevated
+      - feature: price_change_pct
+        operator: "<="
+        threshold_ref: price_stable_high
+        note: "Price not rising significantly"
+    explanation_template: |
+      Positive delta exposure (DEX z-score: {dex_zscore:.2f}) with limited
+      price appreciation ({price_change_pct:+.2f}%) suggests distribution.
+      Institutions may be selling into existing bid support.
+
+  # ================================================================
+  # DEFAULT: NO STRONG SIGNAL
+  # ================================================================
+
+  neutral:
+    label: "Neutral / Mixed"
+    priority: 99  # Always last
+    description: |
+      No dominant regime detected. Metrics within normal ranges.
+      Market microstructure in typical operating state.
+    conditions: []  # Fallback when no other regime matches
+    explanation_template: |
+      No dominant regime pattern detected.
+      GEX: {gex_zscore:.2f}σ, DEX: {dex_zscore:.2f}σ,
+      Dark Pool: {dark_pool_ratio_pct:.1f}%.
+      All metrics within normal operating ranges.
+
+# Feature requirements for regime classification
+# Lists all features needed for classification
+required_features:
+  - gex_zscore
+  - dex_zscore
+  - dark_pool_ratio_pct
+  - block_trade_count_zscore
+  - price_change_pct
+  - price_efficiency_pct
+  - impact_per_vol_pct
+
+# Confidence calculation
+# How to compute confidence for a regime match
+confidence:
+  method: threshold_margin
+  description: |
+    Confidence based on how far conditions exceed thresholds.
+    Higher margin = higher confidence.
+  min_confidence: 0.5
+  max_confidence: 1.0

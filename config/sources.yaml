@@ -1,0 +1,124 @@
+# OBSIDIAN MM - API Source Configuration
+# Defines endpoints, rate limits, and authentication for data sources
+
+api_sources:
+  unusual_whales:
+    base_url: "https://api.unusualwhales.com/api"
+    endpoints:
+      # Dark pool data
+      darkpool_ticker: "/darkpool/{ticker}"
+      darkpool_flow: "/darkpool/flow-by-date"
+
+      # Greek exposure
+      greek_exposure: "/stock/{ticker}/greek-exposure"
+      market_greeks: "/market/greeks"
+
+      # Options flow
+      flow_ticker: "/stock/{ticker}/flow"
+      flow_alerts: "/flow/alerts"
+
+      # IV and skew
+      iv_term_structure: "/stock/{ticker}/iv-term-structure"
+
+    rate_limit:
+      requests_per_minute: 60
+      burst_size: 10
+    timeout_seconds: 30
+    retry:
+      max_attempts: 3
+      backoff_factor: 2.0
+    auth:
+      type: bearer
+      header: "Authorization"
+      prefix: "Bearer"
+
+  polygon:
+    base_url: "https://api.polygon.io"
+    endpoints:
+      # Daily aggregates
+      aggregates: "/v2/aggs/ticker/{ticker}/range/1/day/{from}/{to}"
+      daily_open_close: "/v1/open-close/{ticker}/{date}"
+
+      # Grouped (all tickers for a date)
+      grouped_daily: "/v2/aggs/grouped/locale/us/market/stocks/{date}"
+
+      # Previous close
+      previous_close: "/v2/aggs/ticker/{ticker}/prev"
+
+    rate_limit:
+      # Adjust based on your plan tier
+      requests_per_minute: 5  # Free tier
+      # requests_per_minute: 100  # Starter
+      # requests_per_minute: unlimited  # Developer+
+      burst_size: 5
+    timeout_seconds: 30
+    retry:
+      max_attempts: 3
+      backoff_factor: 2.0
+    auth:
+      type: query_param
+      param_name: "apiKey"
+
+  fmp:
+    base_url: "https://financialmodelingprep.com/stable"
+    endpoints:
+      # ETF data
+      etf_holdings: "/etf/holdings"
+      etf_sector_weights: "/etf/sector-weightings"
+
+      # Sector performance
+      sector_performance: "/sector-performance-snapshot"
+
+      # Institutional ownership
+      institutional: "/institutional-ownership/extract"
+
+      # Market overview
+      market_overview: "/market-overview"
+
+    rate_limit:
+      requests_per_minute: 300
+      burst_size: 30
+    timeout_seconds: 30
+    retry:
+      max_attempts: 3
+      backoff_factor: 2.0
+    auth:
+      type: query_param
+      param_name: "apikey"
+
+# Index ETFs for market context
+# Used to provide broader market backdrop for regime classification
+index_etfs:
+  - ticker: SPY
+    name: "S&P 500 ETF"
+    tracks: "S&P 500"
+  - ticker: QQQ
+    name: "Nasdaq 100 ETF"
+    tracks: "Nasdaq 100"
+  - ticker: IWM
+    name: "Russell 2000 ETF"
+    tracks: "Russell 2000"
+
+# Default ticker universe - small test set
+default_tickers:
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+
+
+# Cache configuration
+cache:
+  # File cache for raw API responses
+  file_cache:
+    enabled: true
+    directory: "data/raw"
+    format: "parquet"
+    # Don't re-fetch if file exists and is recent
+    ttl_hours: 24
+
+  # Memory cache for repeated reads
+  memory_cache:
+    enabled: true
+    max_size: 1000
+    ttl_seconds: 3600
