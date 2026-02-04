@@ -454,6 +454,221 @@ It allows the user to:
 It deliberately avoids telling the user what to do.
 
 ---
+
+## Regime Transition Matrix
+
+**Formal State-Space Description**
+
+---
+
+### 1. Purpose
+
+The Regime Transition Matrix (RTM) describes how market-maker regimes evolve over time, without implying prediction or optimal action.
+
+Its role is to:
+- quantify structural persistence
+- identify unstable vs stable market states
+- distinguish temporary anomalies from true regime shifts
+
+**The RTM is descriptive, not predictive.**
+
+---
+
+### 2. State Space Definition
+
+Let the discrete regime state at day t be:
+
+```
+R_t ∈ S
+```
+
+where the finite state set is:
+
+```
+S = {Gamma+ Control, Gamma− Liquidity Vacuum, Dark-Dominant Accumulation,
+     Absorption-Like, Distribution-Like, Neutral, Undetermined}
+```
+
+Each trading day has exactly one assigned state.
+
+---
+
+### 3. Transition Definition
+
+A transition occurs when:
+
+```
+R_t ≠ R_{t-1}
+```
+
+The ordered pair (R_{t-1}, R_t) defines a state transition event.
+
+---
+
+### 4. Transition Matrix Construction
+
+For a given instrument i over a time window T, define the empirical transition counts:
+
+```
+C_jk = #{t ∈ T : R_{t-1} = j ∧ R_t = k}
+```
+
+where j, k ∈ S.
+
+The transition probability matrix is then:
+
+```
+P_jk = C_jk / Σ_k' C_jk'
+```
+
+Each row of P sums to 1.
+
+---
+
+### 5. Interpretation Constraints
+
+#### 5.1 No Markov Assumption
+
+Although the matrix resembles a Markov transition matrix P(R_t | R_{t-1}), OBSIDIAN MM does **NOT** assume:
+- stationarity
+- time-homogeneity
+- predictive sufficiency
+
+The matrix is empirical and descriptive only.
+
+#### 5.2 Time-Scale Awareness
+
+Transitions are evaluated at daily resolution. Therefore:
+- intra-day regime oscillations are intentionally ignored
+- only structural daily shifts are represented
+
+---
+
+### 6. Derived Diagnostics (Non-Predictive)
+
+The RTM supports several secondary diagnostics.
+
+#### 6.1 Self-Transition Probability (Persistence)
+
+For state j:
+
+```
+π_j = P_jj
+```
+
+- High π_j implies regime stability, structural dominance
+- Low π_j implies fragile or transitional regime
+
+#### 6.2 Transition Entropy
+
+Define the entropy of outgoing transitions from state j:
+
+```
+H_j = -Σ_k P_jk log P_jk
+```
+
+Interpretation:
+- low entropy → deterministic regime behavior
+- high entropy → unstable / mixed conditions
+
+#### 6.3 Absorbing-Like States (Informal)
+
+A regime is absorbing-like if:
+
+```
+P_jj >> P_jk  ∀k ≠ j
+```
+
+This does not imply permanence, only relative dominance in the observed window.
+
+---
+
+### 7. Transition Semantics (Qualitative)
+
+The RTM allows interpretation of structural market mechanics, not price outcomes.
+
+Examples:
+
+| Transition | Interpretation |
+|------------|----------------|
+| Gamma+ Control → Neutral | Dealer hedging pressure relaxed, control diminishes without stress |
+| Neutral → Gamma− Vacuum | Transition into liquidity stress, often coincides with volatility shocks |
+| Dark-Dominant → Absorption-Like | Off-exchange positioning followed by visible flow absorption |
+| Frequent Neutral ↔ Mixed | Indicates MM inventory balancing, no dominant regime |
+
+These interpretations are **ex post descriptors**, not forecasts.
+
+---
+
+### 8. Conditioning on Unusualness
+
+Optionally, transitions may be conditioned on unusualness magnitude.
+
+Define a threshold θ:
+
+```
+U_t > θ
+```
+
+Construct a conditional transition matrix:
+
+```
+P^(U>θ)_jk = P(R_t = k | R_{t-1} = j, U_t > θ)
+```
+
+Purpose: distinguish routine regime changes from stress-driven transitions.
+
+This remains descriptive.
+
+---
+
+### 9. Instrument-Specific Nature
+
+Transition matrices are computed per instrument.
+
+They must **never** be:
+- pooled across tickers
+- averaged across instrument types
+- normalized cross-sectionally
+
+Each RTM reflects that instrument's microstructure personality.
+
+---
+
+### 10. What the RTM Explicitly Does NOT Do
+
+The Regime Transition Matrix does not:
+- predict the next regime
+- estimate expected returns
+- optimize decision rules
+- imply causal direction
+
+Formally:
+
+```
+P(R_{t+1} | R_t) ⇏ E[ΔP_{t+1}]
+```
+
+---
+
+### 11. Summary
+
+The Regime Transition Matrix provides a **second-order diagnostic layer**:
+- **First order**: What regime are we in?
+- **Second order**: How stable is this regime historically?
+
+It transforms OBSIDIAN MM from a snapshot tool into a structural state-space monitor, without crossing into prediction or strategy.
+
+---
+
+### Closing Principle
+
+> Markets do not move from signal to signal.
+> They evolve from state to state.
+>
+> **The RTM exists to observe that evolution, not to trade it.**
+
+---
 ---
 
 ## Philosophy
