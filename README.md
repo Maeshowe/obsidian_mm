@@ -262,6 +262,198 @@ It describes market states, using normalized deviations from instrument-specific
 **Its value lies in context, not signals.**
 
 ---
+
+## Dashboard Architecture & Mathematical Interpretation
+
+This section defines the mathematical meaning and diagnostic intent of each dashboard page.
+The dashboard is not a visualization of raw data, but a structured projection of the OBSIDIAN MM state space.
+
+**Each page answers exactly one question.**
+
+---
+
+### 1. Daily State Page
+
+*"What is the market-maker-relevant state today?"*
+
+#### 1.1 Displayed Quantities
+
+For instrument i on day t:
+
+- **MM Unusualness Score**: U_{i,t} ∈ [0, 100]
+- **MM Regime Label**: R_{i,t} ∈ {Gamma+ Control, Gamma− Vacuum, Dark-Dominant, Absorption, Distribution, Neutral, Undetermined}
+- **Explainability Vector**: E_{i,t} = {f₁, f₂, f₃} where f_k are the top contributing normalized features
+
+#### 1.2 Mathematical Interpretation
+
+The Daily State Page represents a single point evaluation of the market microstructure:
+
+```
+State_{i,t} = (U_{i,t}, R_{i,t}, E_{i,t})
+```
+
+This page does not show history and does not imply dynamics.
+
+#### 1.3 Diagnostic Meaning
+
+- U_{i,t} measures magnitude of deviation from the instrument's baseline
+- R_{i,t} classifies the structural regime dominating today
+- E_{i,t} explains why this regime was assigned
+
+**No directional inference is allowed.**
+
+---
+
+### 2. Historical Regimes Page
+
+*"How has the market-maker regime evolved over time?"*
+
+#### 2.1 Displayed Quantities
+
+For a rolling window t ∈ [T₀, T]:
+- Regime time series: {R_{i,t}} for t = T₀ to T
+- Unusualness time series: {U_{i,t}} for t = T₀ to T
+
+#### 2.2 Mathematical Interpretation
+
+This page visualizes the state trajectory of the system:
+
+```
+Γ_i = {(U_{i,t}, R_{i,t})} for t = T₀ to T
+```
+
+The trajectory shows regime persistence, transitions, and clustering—not trend strength.
+
+#### 2.3 Diagnostic Meaning
+
+- Long runs of the same R_{i,t} ⇒ structural persistence
+- Rapid switching ⇒ unstable or mixed conditions
+- High U_{i,t} without regime change ⇒ intensity within a stable regime
+
+This page answers "how often and how long", not "where price goes."
+
+---
+
+### 3. Drivers & Contributors Page
+
+*"Which factors are responsible for the current state?"*
+
+#### 3.1 Displayed Quantities
+
+For day t, let the normalized feature vector be:
+
+```
+Z_{i,t} = (Z_dark, Z_GEX, Z_venue, Z_block, Z_IV/skew, ...)
+```
+
+The dashboard shows:
+- Absolute contributions: |w_k × Z_{k,i,t}|
+- Top k ∈ {1,2,3} contributors
+
+#### 3.2 Mathematical Interpretation
+
+The unusualness score is decomposed as:
+
+```
+U_{i,t} = PercentileRank(Σ_k w_k |Z_{k,i,t}|)
+```
+
+This page exposes the partial derivatives of the score with respect to each feature:
+
+```
+∂U/∂Z_k ∝ w_k |Z_{k,i,t}|
+```
+
+#### 3.3 Diagnostic Meaning
+
+- Identifies dominant stressors
+- Separates:
+  - option-driven stress (Greeks)
+  - liquidity stress (impact / dark pool)
+  - structural positioning (blocks)
+
+This page answers "what is driving the diagnosis."
+
+---
+
+### 4. Baseline Status Page (Implicit / Badge-Level)
+
+*"How confident is this diagnosis?"*
+
+#### 4.1 Displayed Quantities
+
+For each feature f:
+- Observation count: n_f
+- Minimum required: n_f ≥ N_min = 21
+
+Baseline state: B_i ∈ {EMPTY, PARTIAL, COMPLETE}
+
+#### 4.2 Mathematical Interpretation
+
+The effective feature set used is:
+
+```
+F_{i,t} = {f : n_f ≥ N_min}
+```
+
+Excluded features:
+
+```
+F^c_{i,t} = {f : n_f < N_min}
+```
+
+#### 4.3 Diagnostic Meaning
+
+- **BASELINE_COMPLETE** ⇒ full confidence
+- **BASELINE_PARTIAL** ⇒ conditional diagnosis
+- **BASELINE_EMPTY** ⇒ no diagnosis
+
+The system never extrapolates beyond available data.
+
+---
+
+### 5. What the Dashboard Explicitly Does NOT Show
+
+To avoid misinterpretation, the dashboard intentionally excludes:
+- price forecasts
+- trade entries or exits
+- probability of direction
+- backtested performance
+- signal confidence metrics
+
+Formally:
+
+```
+∀t: Dashboard(t) ⇏ E[ΔP_{t+1}]
+```
+
+---
+
+### 6. Information-Theoretic Summary
+
+Each dashboard page projects the same underlying system state into a different information subspace:
+
+| Page | Question | Mathematical Role |
+|------|----------|-------------------|
+| Daily State | What is today? | Point estimate |
+| Historical Regimes | How did we get here? | State trajectory |
+| Drivers | Why this state? | Score decomposition |
+| Baseline Status | How reliable is this? | Confidence constraint |
+
+---
+
+### 7. Final Note
+
+**The dashboard is a lens, not a lever.**
+
+It allows the user to:
+- observe regime structure
+- assess deviation from normal
+- understand dominant forces
+
+It deliberately avoids telling the user what to do.
+
+---
 ---
 
 ## Philosophy
