@@ -2,6 +2,221 @@
 
 **Daily Market-Maker Regime & Unusualness Engine**
 
+---
+
+## Baseline Definition
+
+**Formal Reference Framework**
+
+---
+
+### 0. Why Baselines Exist
+
+OBSIDIAN MM does not measure absolute market quantities.
+It measures **deviations from what is normal**.
+
+Formally:
+
+> No observation is meaningful without a reference state.
+> The baseline defines that reference.
+
+Without an explicit baseline:
+- "high" volume is meaningless
+- "large" dark pool activity is ambiguous
+- "extreme" gamma exposure cannot be evaluated
+
+**Every output of OBSIDIAN MM is therefore conditional on a baseline.**
+
+---
+
+### 1. What a Baseline Is (Formal Definition)
+
+For a given instrument i, a baseline is a collection of statistical reference distributions describing normal market-maker-relevant behavior.
+
+Let X_{i,t} be a daily metric (e.g. dark pool share, GEX, price impact).
+
+The baseline for X is defined as:
+
+```
+B_i(X) = {μ_X, σ_X, Q_X}
+```
+
+where:
+- μ_X = rolling mean
+- σ_X = rolling dispersion (std or MAD)
+- Q_X = empirical quantiles
+
+computed over a rolling window:
+
+```
+W = 63 trading days
+```
+
+---
+
+### 2. Instrument-Specific Nature of Baselines
+
+Baselines are always instrument-specific.
+
+Formally:
+
+```
+B_i ≠ B_j  for i ≠ j
+```
+
+Even within the same sector or index:
+- liquidity structure differs
+- options open interest differs
+- dark pool participation differs
+
+**Consequence:** Baselines must never be:
+- pooled across instruments
+- averaged cross-sectionally
+- borrowed from proxies
+
+---
+
+### 3. Minimum Observation Requirement
+
+A baseline is considered valid only if sufficient historical observations exist.
+
+Let n_X be the number of stored observations for feature X.
+
+```
+n_X ≥ N_min = 21
+```
+
+If this condition is not met:
+- the feature is excluded
+- no inference is made
+- no approximation is allowed
+
+---
+
+### 4. Baseline States
+
+Each instrument has an explicit baseline state:
+
+#### 4.1 BASELINE_EMPTY
+
+```
+∀X: n_X < N_min
+```
+
+No diagnosis is possible.
+
+#### 4.2 BASELINE_PARTIAL
+
+```
+∃X₁, X₂: n_X₁ ≥ N_min ∧ n_X₂ < N_min
+```
+
+Diagnosis is conditional and excludes missing features.
+
+#### 4.3 BASELINE_COMPLETE
+
+```
+∀X ∈ F: n_X ≥ N_min
+```
+
+Full diagnostic confidence.
+
+---
+
+### 5. Locked vs Dynamic Baselines
+
+Baselines are split into structural and state-dependent components.
+
+#### 5.1 Locked Baselines (Structural)
+
+Updated infrequently (quarterly or manual review):
+- typical dark pool share range
+- block size distribution
+- instrument liquidity profile
+- long-run Greek characteristics
+
+These represent structural properties of the instrument.
+
+#### 5.2 Dynamic Baselines (Rolling)
+
+Updated daily via rolling windows:
+- z-scores of dark share
+- z-scores of GEX / DEX
+- price impact / efficiency
+- IV and skew deviations
+
+These represent current deviation from structure.
+
+---
+
+### 6. What Baselines Are NOT
+
+Baselines are not:
+- forecasts
+- regime predictors
+- adaptive learning models
+- optimization targets
+
+Formally:
+
+```
+B_i(X) ⇏ E[X_{i,t+1}]
+```
+
+They exist solely to contextualize observations.
+
+---
+
+### 7. Baseline Drift Control
+
+Baselines are monitored for structural drift.
+
+If a baseline parameter changes by more than a predefined threshold:
+
+```
+|( μ_{X,t} - μ_{X,t-1} ) / μ_{X,t-1}| > δ
+```
+
+a baseline drift warning is raised.
+
+This prevents silent redefinition of "normal."
+
+---
+
+### 8. Baselines and Unusualness
+
+All normalized metrics in OBSIDIAN MM are defined as:
+
+```
+Z_{X,i,t} = (X_{i,t} - μ_X) / σ_X
+```
+
+Unusualness is therefore **relative**, not absolute.
+
+---
+
+### 9. Governing Principle
+
+> OBSIDIAN MM never asks "Is this big?"
+> It asks "Is this unusual **for this instrument**?"
+
+**Baselines are the answer to that question.**
+
+---
+
+### Summary
+
+The baseline framework is the foundation of OBSIDIAN MM.
+
+If the baseline is missing:
+- the system refuses to guess
+- the output is explicitly marked as incomplete
+
+**This is a deliberate design choice.**
+
+---
+---
+
 ## Quantitative Specification
 
 ---
