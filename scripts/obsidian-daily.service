@@ -13,7 +13,7 @@ StandardOutput=append:/home/safrtam/obsidian_mm/logs/daily.log
 StandardError=append:/home/safrtam/obsidian_mm/logs/daily.log
 
 # Auto-compute baseline when enough data collected
-ExecStartPost=/bin/bash -c 'DAYS=$(ls -1 /home/safrtam/obsidian_mm/data/processed/feature_history/SPY/*.json 2>/dev/null | wc -l); if [ "$DAYS" -ge 21 ]; then /home/safrtam/obsidian_mm/.venv/bin/python scripts/compute_baseline.py SPY QQQ IWM DIA --local-only --force; fi'
+ExecStartPost=/bin/bash -c 'DAYS=$(ls -1 /home/safrtam/obsidian_mm/data/processed/feature_history/SPY/*.json 2>/dev/null | /usr/bin/wc -l); if [ "$DAYS" -ge 21 ]; then /home/safrtam/obsidian_mm/.venv/bin/python scripts/compute_baseline.py SPY QQQ IWM DIA --local-only --force; fi'
 
 [Install]
 WantedBy=multi-user.target
