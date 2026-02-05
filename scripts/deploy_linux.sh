@@ -6,7 +6,6 @@
 # Prerequisites:
 #   - Python 3.12+
 #   - Git
-#   - systemd (for scheduled tasks)
 
 set -e
 
@@ -18,18 +17,9 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}=== OBSIDIAN MM Linux Deployment ===${NC}"
 
-# Configuration
-INSTALL_DIR="${INSTALL_DIR:-/opt/obsidian_mm}"
+# Configuration - uses current directory
+INSTALL_DIR="$(pwd)"
 VENV_DIR="${INSTALL_DIR}/.venv"
-SERVICE_USER="${SERVICE_USER:-obsidian}"
-REPO_URL="${REPO_URL:-https://github.com/YOUR_USERNAME/obsidian_mm.git}"
-
-# Check if running as root for system-wide install
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${YELLOW}Not running as root. Will install to current directory.${NC}"
-    INSTALL_DIR="$(pwd)"
-    VENV_DIR="${INSTALL_DIR}/.venv"
-fi
 
 echo "Install directory: ${INSTALL_DIR}"
 
@@ -99,8 +89,14 @@ echo -e "\n${GREEN}=== Deployment Complete ===${NC}"
 echo ""
 echo "Next steps:"
 echo "  1. Edit .env file with your API keys"
-echo "  2. Set up systemd service: sudo cp scripts/obsidian-daily.service /etc/systemd/system/"
-echo "  3. Enable service: sudo systemctl enable obsidian-daily.timer"
-echo "  4. Start service: sudo systemctl start obsidian-daily.timer"
+echo "  2. Copy systemd files:"
+echo "     sudo cp scripts/obsidian-daily.service /etc/systemd/system/"
+echo "     sudo cp scripts/obsidian-daily.timer /etc/systemd/system/"
+echo "     sudo cp scripts/obsidian-dashboard.service /etc/systemd/system/"
+echo "  3. Enable services:"
+echo "     sudo systemctl daemon-reload"
+echo "     sudo systemctl enable --now obsidian-daily.timer"
+echo "     sudo systemctl enable --now obsidian-dashboard"
+echo "  4. Configure nginx for https://obsidian.ssh.services"
 echo ""
 echo "Manual run: python scripts/run_daily.py SPY QQQ IWM DIA"

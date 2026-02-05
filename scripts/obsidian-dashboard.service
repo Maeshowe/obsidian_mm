@@ -1,0 +1,16 @@
+[Unit]
+Description=OBSIDIAN MM Streamlit Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=safrtam
+Group=safrtam
+WorkingDirectory=/home/safrtam/obsidian_mm
+Environment="PATH=/home/safrtam/obsidian_mm/.venv/bin"
+ExecStart=/home/safrtam/obsidian_mm/.venv/bin/streamlit run obsidian/dashboard/app.py --server.port 8502 --server.headless true --server.address 127.0.0.1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
