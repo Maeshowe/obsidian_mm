@@ -1,10 +1,16 @@
 """
 Configuration management for OBSIDIAN MM.
 
-Loads settings from environment variables and YAML config files.
+Loads settings from environment variables, Streamlit secrets, and YAML config files.
 Uses pydantic for validation.
+
+Priority order:
+1. Streamlit secrets (for cloud deployment)
+2. Environment variables
+3. .env file
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -14,6 +20,26 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from obsidian.core.exceptions import ConfigurationError
+
+
+def _load_streamlit_secrets() -> None:
+    """
+    Load Streamlit secrets into environment variables.
+
+    This allows the app to work both locally (with .env) and
+    on Streamlit Cloud (with secrets).
+    """
+    try:
+        import streamlit as st
+
+        # Check if running in Streamlit and secrets are available
+        if hasattr(st, "secrets") and len(st.secrets) > 0:
+            for key in ["UNUSUAL_WHALES_API_KEY", "POLYGON_API_KEY", "FMP_API_KEY"]:
+                if key in st.secrets and key not in os.environ:
+                    os.environ[key] = st.secrets[key]
+    except Exception:
+        # Not running in Streamlit or secrets not available
+        pass
 
 
 class Settings(BaseSettings):
@@ -214,7 +240,12 @@ class RegimesConfig:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Get cached application settings."""
+    """
+    Get cached application settings.
+
+    Loads Streamlit secrets first (if available) to support cloud deployment.
+    """
+    _load_streamlit_secrets()
     return Settings()
 
 

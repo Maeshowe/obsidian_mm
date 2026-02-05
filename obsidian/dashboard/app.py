@@ -324,7 +324,11 @@ def render_no_data_state(ticker: str, selected_date: date) -> None:
                     st.session_state["data"] = data
                     st.rerun()
                 else:
-                    st.error("Pipeline failed. Check your API keys in .env")
+                    st.error(
+                        "Pipeline failed. Check API keys:\n"
+                        "- **Local**: Set in `.env` file\n"
+                        "- **Streamlit Cloud**: Add in app Settings → Secrets"
+                    )
 
     with col2:
         # Show available dates for this ticker
