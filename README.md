@@ -2,1194 +2,512 @@
 
 **Daily Market-Maker Regime & Unusualness Engine**
 
----
-
-## Baseline Definition
-
-**Formal Reference Framework**
-
----
-
-### 0. Why Baselines Exist
-
-OBSIDIAN MM does not measure absolute market quantities.
-It measures **deviations from what is normal**.
-
-Formally:
-
-> No observation is meaningful without a reference state.
-> The baseline defines that reference.
-
-Without an explicit baseline:
-- "high" volume is meaningless
-- "large" dark pool activity is ambiguous
-- "extreme" gamma exposure cannot be evaluated
-
-**Every output of OBSIDIAN MM is therefore conditional on a baseline.**
+| | |
+|---|---|
+| **Version** | 1.0 |
+| **Classification** | Internal Technical Reference |
+| **Scope** | Market Microstructure Diagnostic System — Regime Classification & Unusualness Scoring |
+| **Instrument Universe** | US Single Stocks, Index ETFs (SPY, QQQ, IWM) |
+| **Temporal Resolution** | Daily Aggregation (T+0 close) |
 
 ---
 
-### 1. What a Baseline Is (Formal Definition)
+## 1. System Definition
 
-For a given instrument i, a baseline is a collection of statistical reference distributions describing normal market-maker-relevant behavior.
+OBSIDIAN MM is a deterministic, rule-based diagnostic engine that measures the degree of deviation of an instrument's daily market microstructure state from its own empirical norm. The system produces two outputs per instrument per trading day:
 
-Let X_{i,t} be a daily metric (e.g. dark pool share, GEX, price impact).
+| Output | Type | Domain |
+|--------|------|--------|
+| **MM Unusualness Score** | Continuous | U ∈ [0, 100] |
+| **MM Regime Label** | Categorical | R ∈ {Γ⁺, Γ⁻, DD, ABS, DIST, NEU, UND} |
 
-The baseline for X is defined as:
+Both outputs are accompanied by a mandatory explainability vector identifying the top contributing features.
 
-```
-B_i(X) = {μ_X, σ_X, Q_X}
-```
+**Scope exclusions.** The system does not generate signals, forecasts, alpha estimates, or actionable trade recommendations. All outputs are descriptive and diagnostic. Formally, for any output O at time t:
+
+    O(t) ⇏ E[ΔP(t+1)]
+
+---
+
+## 2. Data Sources
+
+The system consumes daily-aggregated data from three authoritative providers. No derived proxies are used where a direct source metric exists.
+
+| Domain | Provider | Endpoint Category |
+|--------|----------|-------------------|
+| Dark pool / off-exchange volume, block prints | Unusual Whales API | Dark pool flow |
+| Options Greeks: GEX, DEX, Vanna, Charm | Unusual Whales API | Options exposure |
+| IV surface, skew, term structure | Unusual Whales API | Volatility data |
+| Daily OHLCV, index ETF context | Polygon.io API | Price & volume |
+| ETF flows, sector performance | FMP Ultimate API | Macro overlay |
+
+**Data quality rule.** If a source field is missing or flagged as stale on a given day, it is recorded as `NaN`. No interpolation, imputation, or forward-fill is applied. The downstream pipeline treats `NaN` as an explicit exclusion trigger.
+
+---
+
+## 3. Baseline Framework
+
+### 3.1 Definition
+
+For instrument *i* and daily feature *X*, the baseline is a tuple of rolling statistics:
+
+    B_i(X) = { μ_X , σ_X , Q_X }
 
 where:
-- μ_X = rolling mean
-- σ_X = rolling dispersion (std or MAD)
-- Q_X = empirical quantiles
 
-computed over a rolling window:
+- **μ_X** = rolling arithmetic mean of X
+- **σ_X** = rolling sample standard deviation of X
+- **Q_X** = empirical quantile function of X (used for percentile ranking)
 
-```
-W = 63 trading days
-```
+All statistics are computed over a fixed rolling window:
 
----
+    W = 63 trading days  (≈ 1 calendar quarter)
 
-### 2. Instrument-Specific Nature of Baselines
+### 3.2 Minimum Observation Threshold
 
-Baselines are always instrument-specific.
+A baseline is valid if and only if:
 
-Formally:
+    n_X ≥ N_min = 21 trading days
 
-```
-B_i ≠ B_j  for i ≠ j
-```
+where n_X is the count of non-NaN observations of feature X within the current window. If this condition is not met, the feature is excluded from all downstream computation. No approximation or relaxation of N_min is permitted.
 
-Even within the same sector or index:
-- liquidity structure differs
-- options open interest differs
-- dark pool participation differs
+### 3.3 Baseline States
 
-**Consequence:** Baselines must never be:
-- pooled across instruments
-- averaged cross-sectionally
-- borrowed from proxies
+Each instrument is assigned exactly one baseline state:
 
----
+| State | Condition | System Behavior |
+|-------|-----------|-----------------|
+| **BASELINE_EMPTY** | ∀X : n_X < 21 | No diagnosis. Output = UND. |
+| **BASELINE_PARTIAL** | ∃X₁,X₂ : n_X₁ ≥ 21 ∧ n_X₂ < 21 | Conditional diagnosis. Excluded features listed. |
+| **BASELINE_COMPLETE** | ∀X ∈ F : n_X ≥ 21 | Full diagnostic confidence. |
 
-### 3. Minimum Observation Requirement
+### 3.4 Expansion Phase (Cold Start)
 
-A baseline is considered valid only if sufficient historical observations exist.
+For the first 63 trading days after onboarding, the baseline uses an expanding window:
 
-Let n_X be the number of stored observations for feature X.
+    t ≤ 63 :  μ_X(t) = (1/t) × Σ_{k=1}^{t} X_k
+              σ_X(t) = sqrt( (1/(t-1)) × Σ_{k=1}^{t} (X_k − μ_X(t))² )
 
-```
-n_X ≥ N_min = 21
-```
+    t > 63 :  transition to fixed rolling window W = 63
 
-If this condition is not met:
-- the feature is excluded
-- no inference is made
-- no approximation is allowed
+The first valid z-score is emitted at t = 21 (per-feature).
 
----
+### 3.5 Instrument Isolation
 
-### 4. Baseline States
+Baselines are strictly instrument-specific:
 
-Each instrument has an explicit baseline state:
+    B_i ≠ B_j   for i ≠ j
 
-#### 4.1 BASELINE_EMPTY
+Cross-sectional pooling, averaging, or proxy-borrowing across instruments is prohibited.
 
-```
-∀X: n_X < N_min
-```
+### 3.6 Baseline Drift Detection
 
-No diagnosis is possible.
+If the rolling mean changes by more than a relative threshold δ between consecutive trading days:
 
-#### 4.2 BASELINE_PARTIAL
+    | (μ_{X,t} − μ_{X,t−1}) / μ_{X,t−1} | > δ
 
-```
-∃X₁, X₂: n_X₁ ≥ N_min ∧ n_X₂ < N_min
-```
+a **BASELINE_DRIFT** warning is raised. Recommended default: δ = 0.10 (10%). This prevents silent redefinition of "normal" and flags structural breaks.
 
-Diagnosis is conditional and excludes missing features.
+### 3.7 Locked vs. Dynamic Components
 
-#### 4.3 BASELINE_COMPLETE
+| Component | Update Frequency | Examples |
+|-----------|-----------------|----------|
+| **Locked (Structural)** | Quarterly / manual review | Typical dark pool share range, block size distribution, instrument liquidity profile |
+| **Dynamic (Rolling)** | Daily, via W=63 window | Z-scores of all features, percentile ranks |
 
-```
-∀X ∈ F: n_X ≥ N_min
-```
-
-Full diagnostic confidence.
+Locked components represent the instrument's structural identity. Dynamic components measure deviation from that identity.
 
 ---
 
-### 5. Locked vs Dynamic Baselines
+## 4. Feature Definitions
 
-Baselines are split into structural and state-dependent components.
+### 4.1 Dark Pool Share
 
-#### 5.1 Locked Baselines (Structural)
+Let V^dark_t = aggregate dark pool / off-exchange volume on day t, and V^total_t = total consolidated volume.
 
-Updated infrequently (quarterly or manual review):
-- typical dark pool share range
-- block size distribution
-- instrument liquidity profile
-- long-run Greek characteristics
-
-These represent structural properties of the instrument.
-
-#### 5.2 Dynamic Baselines (Rolling)
-
-Updated daily via rolling windows:
-- z-scores of dark share
-- z-scores of GEX / DEX
-- price impact / efficiency
-- IV and skew deviations
-
-These represent current deviation from structure.
-
----
-
-### 6. What Baselines Are NOT
-
-Baselines are not:
-- forecasts
-- regime predictors
-- adaptive learning models
-- optimization targets
-
-Formally:
-
-```
-B_i(X) ⇏ E[X_{i,t+1}]
-```
-
-They exist solely to contextualize observations.
-
----
-
-### 7. Baseline Drift Control
-
-Baselines are monitored for structural drift.
-
-If a baseline parameter changes by more than a predefined threshold:
-
-```
-|( μ_{X,t} - μ_{X,t-1} ) / μ_{X,t-1}| > δ
-```
-
-a baseline drift warning is raised.
-
-This prevents silent redefinition of "normal."
-
----
-
-### 8. Baselines and Unusualness
-
-All normalized metrics in OBSIDIAN MM are defined as:
-
-```
-Z_{X,i,t} = (X_{i,t} - μ_X) / σ_X
-```
-
-Unusualness is therefore **relative**, not absolute.
-
----
-
-### 9. Governing Principle
-
-> OBSIDIAN MM never asks "Is this big?"
-> It asks "Is this unusual **for this instrument**?"
-
-**Baselines are the answer to that question.**
-
----
-
-### Summary
-
-The baseline framework is the foundation of OBSIDIAN MM.
-
-If the baseline is missing:
-- the system refuses to guess
-- the output is explicitly marked as incomplete
-
-**This is a deliberate design choice.**
-
----
-
-### Worked Baseline Example
-
-**Building SPY's baseline over the first 30 trading days (cold start)**
-
-This example illustrates how OBSIDIAN MM constructs baselines forward in time using daily pipeline runs, and how it behaves before the minimum observation threshold is reached.
-
----
-
-#### 1. Setup
-
-- Instrument: SPY
-- Rolling baseline window: W = 63
-- Minimum observations: N_min = 21
-- Baseline states: EMPTY → PARTIAL → COMPLETE
-
-Let t = 1,2,...,30 denote the first 30 trading days since onboarding SPY.
-
----
-
-#### 2. What Gets Stored Each Day (Canonical History)
-
-Each day t, OBSIDIAN MM persists a feature row:
-
-```
-X_t = (DarkShare_t, GEX_t, DEX_t, BlockIntensity_t, IVSkew_t,
-       Efficiency_t, Impact_t, (optional: Vanna_t, Charm_t))
-```
-
-**Key point:** Some features may be unavailable due to provider lookback limits. For example:
-- Vanna/Charm may be present only for the last ~7 days from the API, therefore baseline must be built incrementally from stored history.
-
-If a feature is missing on day t, it is recorded as missing, not replaced.
-
----
-
-#### 3. Days 1–20: Baseline Not Yet Valid (BASELINE_EMPTY / PARTIAL)
-
-For t < 21:
-
-```
-n_X(t) < N_min
-```
-
-where n_X(t) is the count of stored observations for feature X up to day t.
-
-**System behavior:**
-- Unusualness score: not computed (or shown as NaN / unavailable)
-- Regime label: UNDETERMINED (or computed only from features with sufficient baseline)
-- Explainability text must state baseline status:
-
-> "Baseline insufficient (<21 observations). Diagnosis withheld."
-
-This prevents false confidence during cold start.
-
----
-
-#### 4. Day 21: Baseline Becomes Usable for Eligible Features
-
-At day t = 21, for any feature X with complete history:
-
-```
-n_X(21) ≥ 21
-```
-
-OBSIDIAN MM can now compute baseline parameters:
-
-```
-μ_X(21) = (1/21) × Σ_{k=1}^{21} X_k
-σ_X(21) = sqrt((1/20) × Σ_{k=1}^{21} (X_k - μ_X(21))²)
-```
-
-and quantiles Q_X if needed.
-
-From this point:
-- DarkShare baseline ✓
-- GEX baseline ✓
-- DEX baseline ✓
-- Efficiency/Impact baseline ✓
-- Anything with missing history may still be excluded
-
-Therefore baseline state is typically: **BASELINE_PARTIAL**
-
----
-
-#### 5. Z-Scores Start on Day 21 (Feature-by-Feature)
-
-For each eligible feature X, the normalized value becomes:
-
-```
-Z_X(t) = (X_t - μ_X(t)) / σ_X(t)   for n_X(t) ≥ 21
-```
-
-**Important:** If n_X(t) < 21, then Z_X(t) is undefined and must not be used.
-
----
-
-#### 6. Days 22–30: Baseline Strengthens, But Remains Short-Window
-
-During t = 22...30:
-- Baseline uses the first t observations until it reaches W = 63
-- Parameters update with each day (rolling expansion phase)
-
-For t ≤ 63:
-
-```
-μ_X(t) = (1/t) × Σ_{k=1}^{t} X_k
-σ_X(t) = sqrt((1/(t-1)) × Σ_{k=1}^{t} (X_k - μ_X(t))²)
-```
-
-After t > 63, the system transitions to a rolling window.
-
----
-
-#### 7. What About Vanna/Charm with Short API Lookback?
-
-Suppose Vanna is available only from day 24 onward (because the API only offers ~7 days history at onboarding).
-
-Then:
-
-```
-n_Vanna(30) = 7 < 21
-```
-
-So:
-- Vanna baseline is not computed
-- Vanna is excluded from scoring/classification
-- Explainability includes: *"Vanna/Charm excluded due to insufficient stored history."*
-
-After ~3 weeks of running daily: n_Vanna ≥ 21 and Vanna/Charm becomes eligible for inclusion.
-
----
-
-#### 8. What the User Should See on Day 30
-
-By day 30:
-- **Many baselines are valid:** DarkShare, GEX, DEX, price efficiency/impact
-- **Some may remain invalid:** Vanna/Charm (often), depending on availability
-
-So the baseline state is commonly: **BASELINE_PARTIAL**
-
-And outputs should look like:
-- **Regime:** computed only if regime rules rely on eligible features (otherwise UNDETERMINED)
-- **Unusualness score:** computed from the subset of available normalized components:
-
-```
-S_t = Σ_{k ∈ F_t} w_k |Z_{k,t}|
-```
-
-where F_t is the set of features with valid baseline at time t.
-
-Score is then mapped to percentile rank over available history:
-
-```
-U_t = PercentileRank(S_t | S_{1:t})
-```
-
-with the understanding that percentile meaning stabilizes as t grows.
-
----
-
-#### 9. Key Takeaways (Why This Matters)
-
-- Baselines are **built forward, never backfilled**
-- The system is allowed to say: *"I don't know yet."*
-- A baseline is not "born complete"; it **matures**
-- Early days are for **data accumulation**, not diagnosis
-
-**This is a deliberate design choice to prevent false confidence.**
-
----
----
-
-## Quantitative Specification
-
----
-
-### 1. Purpose and Scope
-
-OBSIDIAN MM is a diagnostic market microstructure system, not a trading strategy.
-
-Its sole purpose is to measure and classify how unusual the current market state is, from a market-maker and institutional liquidity perspective, using daily-aggregated, source-data-first inputs.
-
-The system explicitly does **NOT**:
-- generate buy/sell signals
-- make price predictions
-- optimize parameters for returns
-- perform backtesting or alpha estimation
-
-All outputs are descriptive and diagnostic, not actionable.
-
----
-
-### 2. Instruments and Timeframe
-
-- **Instrument scope:**
-  - Single stocks (US equities)
-  - Index ETFs (e.g. SPY, QQQ, IWM)
-- **Timeframe:**
-  - Daily aggregation only
-
-Intraday microstructure is intentionally out of scope.
-
----
-
-### 3. Data Sources (Authoritative)
-
-The system prioritizes authoritative source data and minimizes derived proxies.
-
-| Domain | Primary Source |
-|--------|----------------|
-| Dark pool / off-exchange trades | Unusual Whales API |
-| Options Greeks (GEX, DEX, vanna, charm) | Unusual Whales API |
-| Price & volume (OHLCV) | Polygon API |
-| Index / ETF context | Polygon Indices |
-| Macro / sector overlay | FMP Ultimate |
-
-All derived metrics are computed only when no reliable source metric exists.
-
----
-
-### 4. Baseline Framework
-
-#### 4.1 Instrument-Specific Baseline
-
-All measurements are evaluated relative to each instrument's own historical norm.
-
-Let X_t be a daily metric at time t.
-
-Baseline statistics are computed over a rolling window of:
-
-```
-W = 63 trading days
-```
-
-Minimum required observations:
-
-```
-N_min = 21
-```
-
-#### 4.2 Baseline States
-
-Each instrument has an explicit baseline state:
-- **BASELINE_EMPTY**: insufficient history
-- **BASELINE_PARTIAL**: history exists, but some features unavailable
-- **BASELINE_COMPLETE**: all required features meet N_min
-
-Features with insufficient history are excluded, never estimated or backfilled.
-
----
-
-### 5. Core Feature Definitions
-
-#### 5.1 Dark Pool Metrics
-
-Let:
-- V^dark_t = dark pool volume
-- V^total_t = total volume
-
-```
-DarkShare_t = V^dark_t / V^total_t
-```
-
-Normalization:
-
-```
-Z_dark(t) = (DarkShare_t - μ_dark) / σ_dark
-```
-
-Block activity is measured via upper-tail event frequency (e.g. 75th / 90th percentile sizes).
-
-#### 5.2 Dealer Gamma Exposure (GEX)
-
-Let GEX_t denote net dealer gamma exposure for day t.
+    DarkShare_t = V^dark_t / V^total_t
 
 Normalized form:
 
-```
-Z_GEX(t) = (GEX_t - μ_GEX) / σ_GEX
-```
+    Z_dark(t) = ( DarkShare_t − μ_dark ) / σ_dark
 
-Sign convention (locked):
-- GEX > 0: dealers long gamma (stabilizing)
-- GEX < 0: dealers short gamma (destabilizing)
+**Domain:** DarkShare_t ∈ [0, 1]. Values outside this range indicate data error.
 
-#### 5.3 Delta Exposure (DEX)
+### 4.2 Block Trade Intensity
 
-Normalized delta pressure:
+Block trades are defined as prints exceeding a size threshold (source: Unusual Whales block detection). Block intensity is quantified via upper-tail frequency analysis.
 
-```
-Z_DEX(t) = (DEX_t - μ_DEX) / σ_DEX
-```
+Let B_t = count or volume of block-classified prints on day t.
 
-DEX is used only for absorption / distribution context, never alone.
+    Z_block(t) = ( B_t − μ_block ) / σ_block
 
-#### 5.4 Price Impact and Efficiency
+Alternatively, block intensity can be measured as the proportion of volume above the 75th or 90th percentile of historical print sizes for that instrument.
 
-Let:
-- R_t = High_t - Low_t
-- ΔP_t = |Close_t - Open_t|
+### 4.3 Dealer Gamma Exposure (GEX)
 
-Price efficiency (control proxy):
+GEX_t = net dealer gamma exposure on day t, sourced directly from Unusual Whales.
 
-```
-Efficiency_t = R_t / V^total_t
-```
+    Z_GEX(t) = ( GEX_t − μ_GEX ) / σ_GEX
 
-Low values → controlled / absorbed price action.
+**Sign convention (fixed, non-negotiable):**
 
-Impact per volume (vacuum proxy):
+- GEX > 0 → dealers are long gamma → hedging activity dampens price moves (stabilizing)
+- GEX < 0 → dealers are short gamma → hedging amplifies price moves (destabilizing)
 
-```
-Impact_t = ΔP_t / V^total_t
-```
+### 4.4 Dealer Delta Exposure (DEX)
 
-High values → liquidity vacuum.
+DEX_t = net dealer delta exposure on day t.
 
-Both metrics are evaluated relative to the instrument baseline, not in absolute terms.
+    Z_DEX(t) = ( DEX_t − μ_DEX ) / σ_DEX
 
----
+DEX is a contextual feature used exclusively for absorption/distribution classification. It is never used as a standalone diagnostic.
 
-### 6. MM Regime Classification (Deterministic)
+### 4.5 Venue Mix
 
-Exactly one regime per day is assigned, using priority-ordered rules.
+Z_venue(t) captures the distributional shift in execution venue allocation (lit exchanges, dark pools, ATS venues) relative to the instrument's baseline. Computed as a composite z-score across venue-share features.
 
-#### 6.1 Priority Order
+### 4.6 IV Skew and Term Structure
 
-1. Gamma+ Control
-2. Gamma− Liquidity Vacuum
-3. Dark-Dominant Accumulation
-4. Absorption-Like
-5. Distribution-Like
-6. Neutral / Mixed
+Z_IV(t) captures deviations in the implied volatility surface:
 
-Once a rule matches, evaluation stops (short-circuit logic).
+- Put-call skew deviation from rolling baseline
+- Near-term vs. far-term IV ratio deviation
 
-#### 6.2 Regime Definitions
+    Z_IV(t) = ( IVSkew_t − μ_IV ) / σ_IV
 
-**Gamma+ Control**
-```
-Z_GEX > +1.5  AND  Efficiency_t < median baseline
-```
-Interpretation: dealer hedging dampens price movement.
+### 4.7 Price Efficiency (Control Proxy)
 
-**Gamma− Liquidity Vacuum**
-```
-Z_GEX < -1.5  AND  Impact_t > median baseline
-```
-Interpretation: small flows cause large moves.
+Let R_t = High_t − Low_t (intraday range) and V^total_t = total volume.
 
-**Dark-Dominant Accumulation**
-```
-DarkShare_t > 70%  AND  Z_Block > 1.0
-```
-Interpretation: institutional positioning via off-exchange liquidity.
+    Efficiency_t = R_t / V^total_t
 
-**Absorption-Like**
-```
-Z_DEX < -1.0  AND  ΔP_t >= -0.5%  AND  DarkShare_t > 50%
-```
-Interpretation: aggressive flow absorbed without downside follow-through.
+Low Efficiency_t → price is being controlled / absorbed (small range per unit volume).
 
-**Distribution-Like**
-```
-Z_DEX > +1.0  AND  ΔP_t <= +0.5%
-```
-Interpretation: supply present despite positive pressure.
+### 4.8 Price Impact (Vacuum Proxy)
+
+Let ΔP_t = |Close_t − Open_t| (absolute open-to-close move).
+
+    Impact_t = ΔP_t / V^total_t
+
+High Impact_t → small flows causing large directional moves (liquidity vacuum).
+
+**Both Efficiency and Impact are evaluated relative to the instrument's own baseline, not in absolute terms.**
+
+### 4.9 Vanna & Charm (Conditional)
+
+Vanna and Charm exposures are sourced from Unusual Whales when available. Due to API lookback limitations (often ~7 days at onboarding), these features typically require ~3 weeks of daily pipeline runs before reaching N_min = 21.
+
+Until valid:
+
+    n_Vanna < 21  →  feature excluded, noted in explainability output
 
 ---
 
-### 7. MM Unusualness Score
+## 5. MM Unusualness Score
 
-The MM Unusualness Score measures magnitude of deviation, not direction.
+### 5.1 Raw Composite Score
 
-#### 7.1 Raw Score
+The raw unusualness score is a weighted sum of absolute z-scores across the eligible feature set F_t (features with valid baseline at time t):
 
-```
-S_t = 0.25 × |Z_dark(t)|
-    + 0.25 × |Z_GEX(t)|
-    + 0.20 × |Z_venue(t)|
-    + 0.15 × |Z_block(t)|
-    + 0.15 × |Z_IV/skew(t)|
-```
+    S_t = Σ_{k ∈ F_t}  w_k × |Z_k(t)|
 
-Weights are conceptual, not optimized.
+**Fixed diagnostic weights:**
 
-#### 7.2 Final Score
+| Feature k | Weight w_k | Rationale |
+|-----------|-----------|-----------|
+| Z_dark (Dark Pool Share) | 0.25 | Primary institutional flow signal |
+| Z_GEX (Gamma Exposure) | 0.25 | Primary dealer positioning signal |
+| Z_venue (Venue Mix) | 0.20 | Execution structure deviation |
+| Z_block (Block Intensity) | 0.15 | Large-print institutional activity |
+| Z_IV (IV Skew) | 0.15 | Options market stress indicator |
 
-The raw score is mapped to a bounded scale via percentile rank:
+**These weights are conceptual allocations reflecting market microstructure relevance. They are NOT optimized, NOT fitted to historical data, and NOT the product of backtesting. They must not be treated as tunable parameters.**
 
-```
-Unusualness_t = PercentileRank(S_t | S_{t-W:t}) ∈ [0, 100]
-```
+If some features are excluded (BASELINE_PARTIAL), weights are not renormalized. The score reflects only the available feature set.
 
-Interpretation:
-- 0–30: normal
-- 30–60: elevated
-- 60–80: unusual
-- 80–100: extreme microstructure deviation
+### 5.2 Percentile Mapping
 
----
+The raw score is mapped to a bounded [0, 100] scale via percentile rank over the available history:
 
-### 8. Explainability Requirement
+    U_t = PercentileRank( S_t | { S_τ : τ ∈ [t−W, t] } )
 
-Every output includes a human-readable explanation, describing:
-- the assigned regime
-- the top 2–3 contributing factors
-- any excluded features due to incomplete baselines
+where W = 63 (or the expanding window during cold start).
 
-Example:
+### 5.3 Interpretation Bands
 
-> "Dealer gamma was extremely negative while price moved sharply on below-average volume, indicating a liquidity vacuum. Vanna/charm excluded due to insufficient history."
+| U_t Range | Label | Interpretation |
+|-----------|-------|---------------|
+| 0–30 | Normal | Microstructure within historical norms |
+| 30–60 | Elevated | Measurable deviation; monitoring warranted |
+| 60–80 | Unusual | Significant departure from baseline |
+| 80–100 | Extreme | Rare microstructure configuration |
+
+These bands are heuristic labels for human consumption. They do not carry statistical significance thresholds (e.g., they are not p-values).
 
 ---
 
-### 9. Failure and Uncertainty Handling
+## 6. MM Regime Classification
 
-- Missing or incomplete data ⇒ **UNDETERMINED**
-- No interpolation, no backfilling, no inference
-- False negatives are acceptable
-- **False confidence is not**
+### 6.1 Design Principles
 
----
+- **Deterministic:** All rules are explicit conditional logic; no ML, no probabilistic classifiers.
+- **Mutually exclusive:** Exactly one regime per instrument per day.
+- **Priority-ordered:** Rules are evaluated top-to-bottom. First match wins (short-circuit).
+- **Explainable:** Every classification is accompanied by the triggering conditions in human-readable form.
 
-### 10. Summary
+### 6.2 Regime Definitions
 
-OBSIDIAN MM does not predict markets.
-It describes market states, using normalized deviations from instrument-specific norms, through a market-maker lens.
-
-**Its value lies in context, not signals.**
+Regimes are evaluated in the following strict priority order. All thresholds reference z-scores or percentiles computed against the instrument's own baseline.
 
 ---
 
-## Dashboard Architecture & Mathematical Interpretation
+**Priority 1 — Γ⁺ (Gamma-Positive Control)**
 
-This section defines the mathematical meaning and diagnostic intent of each dashboard page.
-The dashboard is not a visualization of raw data, but a structured projection of the OBSIDIAN MM state space.
+    Z_GEX(t) > +1.5   AND   Efficiency_t < median(Efficiency_baseline)
 
-**Each page answers exactly one question.**
-
----
-
-### 1. Daily State Page
-
-*"What is the market-maker-relevant state today?"*
-
-#### 1.1 Displayed Quantities
-
-For instrument i on day t:
-
-- **MM Unusualness Score**: U_{i,t} ∈ [0, 100]
-- **MM Regime Label**: R_{i,t} ∈ {Gamma+ Control, Gamma− Vacuum, Dark-Dominant, Absorption, Distribution, Neutral, Undetermined}
-- **Explainability Vector**: E_{i,t} = {f₁, f₂, f₃} where f_k are the top contributing normalized features
-
-#### 1.2 Mathematical Interpretation
-
-The Daily State Page represents a single point evaluation of the market microstructure:
-
-```
-State_{i,t} = (U_{i,t}, R_{i,t}, E_{i,t})
-```
-
-This page does not show history and does not imply dynamics.
-
-#### 1.3 Diagnostic Meaning
-
-- U_{i,t} measures magnitude of deviation from the instrument's baseline
-- R_{i,t} classifies the structural regime dominating today
-- E_{i,t} explains why this regime was assigned
-
-**No directional inference is allowed.**
+Interpretation: Dealers are significantly long gamma. Their hedging activity compresses the intraday range, resulting in below-normal price efficiency. Volatility suppression regime.
 
 ---
 
-### 2. Historical Regimes Page
+**Priority 2 — Γ⁻ (Gamma-Negative Liquidity Vacuum)**
 
-*"How has the market-maker regime evolved over time?"*
+    Z_GEX(t) < −1.5   AND   Impact_t > median(Impact_baseline)
 
-#### 2.1 Displayed Quantities
-
-For a rolling window t ∈ [T₀, T]:
-- Regime time series: {R_{i,t}} for t = T₀ to T
-- Unusualness time series: {U_{i,t}} for t = T₀ to T
-
-#### 2.2 Mathematical Interpretation
-
-This page visualizes the state trajectory of the system:
-
-```
-Γ_i = {(U_{i,t}, R_{i,t})} for t = T₀ to T
-```
-
-The trajectory shows regime persistence, transitions, and clustering—not trend strength.
-
-#### 2.3 Diagnostic Meaning
-
-- Long runs of the same R_{i,t} ⇒ structural persistence
-- Rapid switching ⇒ unstable or mixed conditions
-- High U_{i,t} without regime change ⇒ intensity within a stable regime
-
-This page answers "how often and how long", not "where price goes."
+Interpretation: Dealers are significantly short gamma. Their hedging amplifies directional moves. Above-normal price impact per unit volume signals a liquidity vacuum.
 
 ---
 
-### 3. Drivers & Contributors Page
+**Priority 3 — DD (Dark-Dominant Accumulation)**
 
-*"Which factors are responsible for the current state?"*
+    DarkShare_t > 0.70   AND   Z_block(t) > +1.0
 
-#### 3.1 Displayed Quantities
-
-For day t, let the normalized feature vector be:
-
-```
-Z_{i,t} = (Z_dark, Z_GEX, Z_venue, Z_block, Z_IV/skew, ...)
-```
-
-The dashboard shows:
-- Absolute contributions: |w_k × Z_{k,i,t}|
-- Top k ∈ {1,2,3} contributors
-
-#### 3.2 Mathematical Interpretation
-
-The unusualness score is decomposed as:
-
-```
-U_{i,t} = PercentileRank(Σ_k w_k |Z_{k,i,t}|)
-```
-
-This page exposes the partial derivatives of the score with respect to each feature:
-
-```
-∂U/∂Z_k ∝ w_k |Z_{k,i,t}|
-```
-
-#### 3.3 Diagnostic Meaning
-
-- Identifies dominant stressors
-- Separates:
-  - option-driven stress (Greeks)
-  - liquidity stress (impact / dark pool)
-  - structural positioning (blocks)
-
-This page answers "what is driving the diagnosis."
+Interpretation: More than 70% of volume is executing off-exchange, with block-print intensity elevated above +1σ. Consistent with institutional positioning via dark liquidity.
 
 ---
 
-### 4. Baseline Status Page (Implicit / Badge-Level)
+**Priority 4 — ABS (Absorption-Like)**
 
-*"How confident is this diagnosis?"*
+    Z_DEX(t) < −1.0   AND   ΔP_t / Close_{t−1} ≥ −0.005   AND   DarkShare_t > 0.50
 
-#### 4.1 Displayed Quantities
-
-For each feature f:
-- Observation count: n_f
-- Minimum required: n_f ≥ N_min = 21
-
-Baseline state: B_i ∈ {EMPTY, PARTIAL, COMPLETE}
-
-#### 4.2 Mathematical Interpretation
-
-The effective feature set used is:
-
-```
-F_{i,t} = {f : n_f ≥ N_min}
-```
-
-Excluded features:
-
-```
-F^c_{i,t} = {f : n_f < N_min}
-```
-
-#### 4.3 Diagnostic Meaning
-
-- **BASELINE_COMPLETE** ⇒ full confidence
-- **BASELINE_PARTIAL** ⇒ conditional diagnosis
-- **BASELINE_EMPTY** ⇒ no diagnosis
-
-The system never extrapolates beyond available data.
+Interpretation: Net delta exposure is significantly negative (sell pressure), but the daily close-to-close move is no worse than −0.5%, and dark pool participation exceeds 50%. Passive buying is absorbing the sell flow.
 
 ---
 
-### 5. What the Dashboard Explicitly Does NOT Show
+**Priority 5 — DIST (Distribution-Like)**
 
-To avoid misinterpretation, the dashboard intentionally excludes:
-- price forecasts
-- trade entries or exits
-- probability of direction
-- backtested performance
-- signal confidence metrics
+    Z_DEX(t) > +1.0   AND   ΔP_t / Close_{t−1} ≤ +0.005
 
-Formally:
-
-```
-∀t: Dashboard(t) ⇏ E[ΔP_{t+1}]
-```
+Interpretation: Net delta exposure is significantly positive (buy pressure), but the daily move is no better than +0.5%. Supply is being distributed into strength without upside follow-through.
 
 ---
 
-### 6. Information-Theoretic Summary
+**Priority 6 — NEU (Neutral / Mixed)**
 
-Each dashboard page projects the same underlying system state into a different information subspace:
+    No prior rule matched.
 
-| Page | Question | Mathematical Role |
-|------|----------|-------------------|
-| Daily State | What is today? | Point estimate |
-| Historical Regimes | How did we get here? | State trajectory |
-| Drivers | Why this state? | Score decomposition |
-| Baseline Status | How reliable is this? | Confidence constraint |
+Interpretation: No single microstructure pattern dominates. The instrument is in a balanced or ambiguous state.
 
 ---
 
-### 7. Final Note
+**Priority 7 — UND (Undetermined)**
 
-**The dashboard is a lens, not a lever.**
+    Baseline state = BASELINE_EMPTY   OR   insufficient features for any rule
 
-It allows the user to:
-- observe regime structure
-- assess deviation from normal
-- understand dominant forces
-
-It deliberately avoids telling the user what to do.
+Interpretation: System cannot classify. Diagnosis withheld.
 
 ---
 
-## Regime Transition Matrix
+### 6.3 Threshold Summary
 
-**Formal State-Space Description**
-
----
-
-### 1. Purpose
-
-The Regime Transition Matrix (RTM) describes how market-maker regimes evolve over time, without implying prediction or optimal action.
-
-Its role is to:
-- quantify structural persistence
-- identify unstable vs stable market states
-- distinguish temporary anomalies from true regime shifts
-
-**The RTM is descriptive, not predictive.**
+| Parameter | Value | Context |
+|-----------|-------|---------|
+| Z_GEX threshold (Γ⁺ / Γ⁻) | ±1.5 | ~93rd percentile under normality |
+| DarkShare threshold (DD) | 0.70 | Absolute proportion |
+| Z_block threshold (DD) | +1.0 | ~84th percentile under normality |
+| Z_DEX threshold (ABS / DIST) | ±1.0 | ~84th percentile under normality |
+| Price move cap (ABS) | ≥ −0.5% | Close-to-close return |
+| Price move cap (DIST) | ≤ +0.5% | Close-to-close return |
+| DarkShare floor (ABS) | 0.50 | Absolute proportion |
+| Efficiency benchmark (Γ⁺) | < median | Rolling 63d median |
+| Impact benchmark (Γ⁻) | > median | Rolling 63d median |
 
 ---
 
-### 2. State Space Definition
+## 7. Explainability Protocol
 
-Let the discrete regime state at day t be:
+Every output tuple (U_t, R_t) must be accompanied by:
 
-```
-R_t ∈ S
-```
+1. **The assigned regime label and its triggering condition values** (e.g., "Z_GEX = +2.14, Efficiency = 0.0032 < median 0.0041")
+2. **The top 2–3 features contributing to U_t**, ranked by w_k × |Z_k(t)|
+3. **A list of any excluded features** with reason (e.g., "Vanna excluded: n = 14 < N_min = 21")
+4. **The baseline state** (EMPTY / PARTIAL / COMPLETE)
 
-where the finite state set is:
+Example output:
 
-```
-S = {Gamma+ Control, Gamma− Liquidity Vacuum, Dark-Dominant Accumulation,
-     Absorption-Like, Distribution-Like, Neutral, Undetermined}
-```
-
-Each trading day has exactly one assigned state.
-
----
-
-### 3. Transition Definition
-
-A transition occurs when:
-
-```
-R_t ≠ R_{t-1}
-```
-
-The ordered pair (R_{t-1}, R_t) defines a state transition event.
+> **Regime: Γ⁻ (Gamma-Negative Liquidity Vacuum)**  
+> Z_GEX = −2.31 (threshold: < −1.5) ✓  
+> Impact = 0.0087 > median 0.0052 ✓  
+> **Unusualness: 78 (Unusual)**  
+> Top drivers: GEX |Z| = 2.31 × 0.25 = 0.58; Dark |Z| = 1.84 × 0.25 = 0.46  
+> Excluded: Charm (n = 9 < 21)  
+> Baseline: PARTIAL
 
 ---
 
-### 4. Transition Matrix Construction
+## 8. Regime Transition Matrix (RTM)
 
-For a given instrument i over a time window T, define the empirical transition counts:
+### 8.1 Purpose
 
-```
-C_jk = #{t ∈ T : R_{t-1} = j ∧ R_t = k}
-```
+The RTM provides second-order diagnostics: not what regime are we in, but how stable is this regime historically. It is descriptive, not predictive.
 
-where j, k ∈ S.
+### 8.2 Construction
 
-The transition probability matrix is then:
+For instrument *i* over window T, the empirical transition count matrix is:
 
-```
-P_jk = C_jk / Σ_k' C_jk'
-```
+    C_jk = #{ t ∈ T : R_{t−1} = j ∧ R_t = k }
 
-Each row of P sums to 1.
+The row-normalized transition probability matrix:
 
----
+    P_jk = C_jk / Σ_{k'} C_{jk'}
 
-### 5. Interpretation Constraints
+Each row sums to 1.
 
-#### 5.1 No Markov Assumption
+### 8.3 Derived Diagnostics
 
-Although the matrix resembles a Markov transition matrix P(R_t | R_{t-1}), OBSIDIAN MM does **NOT** assume:
-- stationarity
-- time-homogeneity
-- predictive sufficiency
+**Self-transition probability (persistence):**
 
-The matrix is empirical and descriptive only.
+    π_j = P_jj
 
-#### 5.2 Time-Scale Awareness
+High π_j → structurally stable regime. Low π_j → fragile / transitional.
 
-Transitions are evaluated at daily resolution. Therefore:
-- intra-day regime oscillations are intentionally ignored
-- only structural daily shifts are represented
+**Transition entropy:**
 
----
+    H_j = − Σ_k  P_jk × log(P_jk)
 
-### 6. Derived Diagnostics (Non-Predictive)
+Low H_j → deterministic transitions from state j. High H_j → unpredictable / mixed behavior.
 
-The RTM supports several secondary diagnostics.
+### 8.4 Constraints
 
-#### 6.1 Self-Transition Probability (Persistence)
+- **No Markov assumption.** The matrix is empirical; stationarity and time-homogeneity are not assumed.
+- **No predictive use.** P(R_{t+1} | R_t) ⇏ E[ΔP_{t+1}].
+- **Instrument-specific.** RTMs must never be pooled or averaged across instruments.
+- **Optional conditioning.** Transitions may be conditioned on unusualness threshold θ:
 
-For state j:
+        P^(U>θ)_jk = P( R_t = k | R_{t−1} = j, U_t > θ )
 
-```
-π_j = P_jj
-```
-
-- High π_j implies regime stability, structural dominance
-- Low π_j implies fragile or transitional regime
-
-#### 6.2 Transition Entropy
-
-Define the entropy of outgoing transitions from state j:
-
-```
-H_j = -Σ_k P_jk log P_jk
-```
-
-Interpretation:
-- low entropy → deterministic regime behavior
-- high entropy → unstable / mixed conditions
-
-#### 6.3 Absorbing-Like States (Informal)
-
-A regime is absorbing-like if:
-
-```
-P_jj >> P_jk  ∀k ≠ j
-```
-
-This does not imply permanence, only relative dominance in the observed window.
+    This distinguishes routine regime changes from stress-driven transitions.
 
 ---
 
-### 7. Transition Semantics (Qualitative)
+## 9. Dashboard Specification
 
-The RTM allows interpretation of structural market mechanics, not price outcomes.
+The dashboard is a structured projection of the system state space. Each page answers exactly one question.
 
-Examples:
+| Page | Question | Mathematical Role | Displayed Quantities |
+|------|----------|-------------------|---------------------|
+| **Daily State** | What is the MM state today? | Point estimate | U_t, R_t, top drivers, baseline state |
+| **Historical Regimes** | How has the regime evolved? | State trajectory | {R_t}, {U_t} over [T₀, T] |
+| **Drivers & Contributors** | What is driving the score? | Score decomposition | w_k × \|Z_k(t)\| for each feature |
+| **Baseline Status** | How reliable is this diagnosis? | Confidence constraint | n_f per feature, baseline state badge |
 
-| Transition | Interpretation |
-|------------|----------------|
-| Gamma+ Control → Neutral | Dealer hedging pressure relaxed, control diminishes without stress |
-| Neutral → Gamma− Vacuum | Transition into liquidity stress, often coincides with volatility shocks |
-| Dark-Dominant → Absorption-Like | Off-exchange positioning followed by visible flow absorption |
-| Frequent Neutral ↔ Mixed | Indicates MM inventory balancing, no dominant regime |
-
-These interpretations are **ex post descriptors**, not forecasts.
+**Explicitly excluded from the dashboard:** price forecasts, trade entries/exits, directional probability, backtested performance, signal confidence metrics.
 
 ---
 
-### 8. Conditioning on Unusualness
+## 10. Failure Modes & Uncertainty Handling
 
-Optionally, transitions may be conditioned on unusualness magnitude.
+| Condition | System Response |
+|-----------|----------------|
+| Feature data missing (NaN) | Feature excluded. No imputation. |
+| n_X < N_min = 21 | Feature excluded from scoring and classification. |
+| All features below N_min | Regime = UND. Score = N/A. |
+| Baseline drift detected | BASELINE_DRIFT warning raised. |
+| API provider outage | Day skipped. No partial inference. |
 
-Define a threshold θ:
-
-```
-U_t > θ
-```
-
-Construct a conditional transition matrix:
-
-```
-P^(U>θ)_jk = P(R_t = k | R_{t-1} = j, U_t > θ)
-```
-
-Purpose: distinguish routine regime changes from stress-driven transitions.
-
-This remains descriptive.
+**Governing principle:** False negatives (missing a diagnosis) are acceptable. False confidence (diagnosing without adequate data) is not.
 
 ---
 
-### 9. Instrument-Specific Nature
+## 11. Parameter Registry
 
-Transition matrices are computed per instrument.
+All system parameters in one place. None are optimized or fitted.
 
-They must **never** be:
-- pooled across tickers
-- averaged across instrument types
-- normalized cross-sectionally
-
-Each RTM reflects that instrument's microstructure personality.
+| Parameter | Symbol | Value | Justification |
+|-----------|--------|-------|---------------|
+| Rolling window | W | 63 trading days | ≈ 1 quarter; balances stability and sensitivity |
+| Minimum observations | N_min | 21 trading days | ≈ 1 month; minimum for meaningful dispersion estimate |
+| GEX z-threshold | — | ±1.5 | Captures ~top/bottom 7% of distribution |
+| DEX z-threshold | — | ±1.0 | Captures ~top/bottom 16% of distribution |
+| Block z-threshold | — | +1.0 | Upper-tail institutional activity |
+| DarkShare threshold (DD) | — | 0.70 | Supermajority off-exchange execution |
+| DarkShare floor (ABS) | — | 0.50 | Majority off-exchange execution |
+| Price move cap (ABS) | — | −0.5% | Close-to-close return tolerance |
+| Price move cap (DIST) | — | +0.5% | Close-to-close return tolerance |
+| Baseline drift threshold | δ | 0.10 | 10% relative shift in rolling mean |
+| Score weight: Z_dark | w₁ | 0.25 | Conceptual, not optimized |
+| Score weight: Z_GEX | w₂ | 0.25 | Conceptual, not optimized |
+| Score weight: Z_venue | w₃ | 0.20 | Conceptual, not optimized |
+| Score weight: Z_block | w₄ | 0.15 | Conceptual, not optimized |
+| Score weight: Z_IV | w₅ | 0.15 | Conceptual, not optimized |
 
 ---
 
-### 10. What the RTM Explicitly Does NOT Do
-
-The Regime Transition Matrix does not:
-- predict the next regime
-- estimate expected returns
-- optimize decision rules
-- imply causal direction
-
-Formally:
+## 12. Architecture Summary
 
 ```
-P(R_{t+1} | R_t) ⇏ E[ΔP_{t+1}]
+Sources (UW / Polygon / FMP)
+    │
+    ▼
+Async Ingest → Raw Cache (Parquet, immutable)
+    │
+    ▼
+Feature Extraction (per-instrument, per-day)
+    │
+    ▼
+Normalization (63d rolling z-score / percentile)
+    │
+    ▼
+Scoring (weighted |Z| sum → percentile rank)  +  Classification (priority-ordered rules)
+    │
+    ▼
+Explainability (top drivers + exclusions + baseline state)
+    │
+    ▼
+Dashboard (Streamlit + Plotly)
 ```
 
----
-
-### 11. Summary
-
-The Regime Transition Matrix provides a **second-order diagnostic layer**:
-- **First order**: What regime are we in?
-- **Second order**: How stable is this regime historically?
-
-It transforms OBSIDIAN MM from a snapshot tool into a structural state-space monitor, without crossing into prediction or strategy.
+**Stack:** Python 3.12, httpx (async ingest), pandas/polars, pydantic (config), pyarrow (Parquet I/O), Streamlit + Plotly (UI), pytest (testing).
 
 ---
 
-### Closing Principle
+## Appendix A: Notation Reference
 
-> Markets do not move from signal to signal.
-> They evolve from state to state.
->
-> **The RTM exists to observe that evolution, not to trade it.**
-
----
----
-
-## Philosophy
-
-*Observational Behavioral System for Institutional & Dealer-Informed Anomaly Networks*
-
-Like obsidian glass—black, sharp, and reflective—this system observes and describes the current state of market microstructure. It does not predict, recommend, or optimize.
-
-**Core principles:**
-- **Observe, don't predict** — We describe what IS, not what WILL BE
-- **Source data first** — Raw API data > derived proxies > computed estimates
-- **Normalize everything** — Absolute values are meaningless without context
-- **Explain everything** — Every label must have a human-readable justification
-
----
-
-## What This System Does
-
-### 1. MM Unusualness Engine
-
-Computes a daily score (0-100) measuring how unusual the current market microstructure state is from a market-maker perspective.
-
-**Inputs:**
-- Dark pool volume and venue mix
-- Dealer gamma/delta exposure (GEX, DEX)
-- Block trade activity
-- IV skew and term structure
-
-**Output:**
-```
-Score: 72 (Unusual)
-Top drivers: GEX +2.1σ, Dark Pool Ratio +1.8σ
-```
-
-### 2. MM Regime Classifier
-
-Assigns a daily regime label to each instrument based on deterministic, rule-based logic.
-
-**Regimes:**
-| Regime | Meaning |
+| Symbol | Meaning |
 |--------|---------|
-| Gamma+ Control | Dealers long gamma → volatility suppressed |
-| Gamma- Liquidity Vacuum | Dealers short gamma → volatility amplified |
-| Dark-Dominant Accumulation | High off-exchange activity with block prints |
-| Absorption-like | Passive buying absorbing sell flow |
-| Distribution-like | Selling into strength |
-| Neutral / Mixed | No dominant pattern |
-
-**Output:**
-```
-Regime: Gamma+ Control
-Explanation: GEX z-score is +2.1 (above +1.5 threshold) with low price
-efficiency, indicating dealers are significantly long gamma. Expect
-volatility suppression.
-```
-
----
-
-## What This System Does NOT Do
-
-| Prohibited | Why |
-|------------|-----|
-| Generate buy/sell signals | This is diagnostics, not trading |
-| Backtest strategies | No alpha research |
-| Use machine learning | Must be explainable |
-| Predict future prices | Describes present state only |
-| Optimize parameters | Weights are conceptual, not fitted |
-
-**The unusualness score weights (0.25, 0.25, 0.20, 0.15, 0.15) are diagnostic weights based on market microstructure relevance. They are NOT optimized parameters, NOT backtest results. They reflect conceptual importance, not predictive power.**
+| X_t | Daily value of feature X at time t |
+| μ_X | Rolling mean of X over window W |
+| σ_X | Rolling standard deviation of X over window W |
+| Z_X(t) | Standardized z-score: (X_t − μ_X) / σ_X |
+| B_i(X) | Baseline tuple {μ, σ, Q} for instrument i, feature X |
+| F_t | Set of features with valid baseline at time t |
+| S_t | Raw unusualness score (weighted absolute z-sum) |
+| U_t | Final unusualness score ∈ [0, 100] (percentile rank of S_t) |
+| R_t | Regime label at time t |
+| W | Rolling window length = 63 trading days |
+| N_min | Minimum observation count = 21 |
+| C_jk | Transition count from regime j to regime k |
+| P_jk | Transition probability: C_jk / Σ_k' C_jk' |
+| π_j | Self-transition probability: P_jj |
+| H_j | Transition entropy from state j |
+| δ | Baseline drift detection threshold = 0.10 |
 
 ---
 
-## Data Sources
+## Appendix B: Quick Start
 
-| Source | Data | Purpose |
-|--------|------|---------|
-| [Unusual Whales](https://unusualwhales.com/api) | Dark pool trades, Greeks (GEX, DEX, vanna, charm), options flow | Primary microstructure data |
-| [Polygon.io](https://polygon.io) | Daily OHLCV, index ETF context | Price context |
-| [FMP](https://financialmodelingprep.com) | ETF flows, sector performance | Macro overlay |
-
----
-
-## Architecture
-
-```
-API Sources → Ingest → Features → Normalize → Score + Classify → Explain → Dashboard
-     │            │         │          │              │              │          │
-  UW/Polygon/   Cache    Extract    63-day      Weighted       Top 2-3     Streamlit
-    FMP         (file)   metrics   z-score/     formula +     drivers +      UI
-                          from     percentile   decision       human
-                          raw                    tree          text
-```
-
-**Key design decisions:**
-- **Streamlit** for dashboard — Chosen deliberately as a diagnostic UI, not a trading frontend
-- **Parquet** for storage — Columnar efficiency for time-series data
-- **Async in ingest only** — Concurrent API fetching; sync everywhere else
-- **63-day rolling window** — Balances statistical stability with regime sensitivity
-
----
-
-## Project Structure
-
-```
-obsidian_mm/
-├── config/
-│   ├── sources.yaml          # API endpoints, rate limits
-│   ├── normalization.yaml    # Rolling windows, z-score params
-│   └── regimes.yaml          # Human-readable regime rules
-├── data/
-│   ├── raw/                  # Immutable API responses
-│   └── processed/            # Daily aggregates
-├── obsidian/
-│   ├── core/                 # Types, config, exceptions
-│   ├── ingest/               # API clients, rate limiter, cache
-│   ├── features/             # Feature extraction from raw data
-│   ├── normalization/        # Rolling z-score, percentile
-│   ├── regimes/              # Rule-based classifier
-│   ├── scoring/              # Unusualness engine
-│   ├── explain/              # Human-readable explanations
-│   ├── dashboard/            # Streamlit UI
-│   └── pipeline/             # Daily orchestration
-├── tests/
-├── scripts/
-└── notebooks/
-```
-
----
-
-## Quick Start
-
-### 1. Install
+### Installation
 
 ```bash
-# Clone and install
 cd obsidian_mm
 pip install -e ".[dev]"
 
@@ -1198,17 +516,14 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-### 2. Run Daily Pipeline
+### Run Daily Pipeline
 
 ```bash
-# Single ticker
-python scripts/run_daily.py SPY
-
-# Multiple tickers
-python scripts/run_daily.py SPY QQQ AAPL NVDA
+python scripts/run_daily.py SPY              # Single ticker
+python scripts/run_daily.py SPY QQQ AAPL     # Multiple tickers
 ```
 
-### 3. Launch Dashboard
+### Launch Dashboard
 
 ```bash
 streamlit run obsidian/dashboard/app.py
@@ -1216,15 +531,33 @@ streamlit run obsidian/dashboard/app.py
 
 ---
 
-## Tech Stack
+## Appendix C: Project Structure
 
-- Python 3.12
-- httpx (async HTTP client)
-- pandas / polars (data manipulation)
-- pydantic (config validation)
-- streamlit + plotly (dashboard)
-- pyarrow (parquet I/O)
-- pytest (testing)
+```
+obsidian_mm/
+├── config/                   # YAML configuration
+│   ├── sources.yaml          # API endpoints, rate limits
+│   ├── normalization.yaml    # Rolling windows, z-score params
+│   └── regimes.yaml          # Regime classification rules
+├── data/
+│   ├── raw/                  # Immutable API responses
+│   ├── processed/            # Daily aggregates + feature history
+│   └── baselines/            # Instrument baselines (JSON)
+├── obsidian/
+│   ├── core/                 # Types, config, exceptions
+│   ├── ingest/               # API clients, rate limiter, cache
+│   ├── features/             # Feature extraction
+│   ├── normalization/        # Rolling z-score, percentile
+│   ├── baseline/             # Baseline calculator, storage, history
+│   ├── regimes/              # Rule-based classifier
+│   ├── scoring/              # Unusualness engine
+│   ├── explain/              # Human-readable explanations
+│   ├── dashboard/            # Streamlit UI
+│   └── pipeline/             # Daily orchestration
+├── tests/
+├── scripts/
+└── docs/
+```
 
 ---
 
