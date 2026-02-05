@@ -1,0 +1,13 @@
+[Unit]
+Description=OBSIDIAN MM Daily Data Collection Timer
+Requires=obsidian-daily.service
+
+[Timer]
+# Run at 22:00 CET (21:00 UTC) on weekdays
+# This is after US market close (16:00 EST = 21:00 UTC in winter, 20:00 UTC in summer)
+OnCalendar=Mon..Fri 21:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -31,7 +31,28 @@ st.set_page_config(
 # Data directory
 DATA_DIR = PROJECT_ROOT / "data" / "processed" / "regimes"
 BASELINES_DIR = PROJECT_ROOT / "data" / "baselines"
+FEATURE_HISTORY_DIR = PROJECT_ROOT / "data" / "processed" / "feature_history"
 CONFIG_DIR = PROJECT_ROOT / "config"
+
+# Baseline requirements
+MIN_OBSERVATIONS = 21
+
+
+def get_data_collection_status(ticker: str) -> dict:
+    """Get status of data collection for baseline computation."""
+    ticker_dir = FEATURE_HISTORY_DIR / ticker
+    if not ticker_dir.exists():
+        return {"days_collected": 0, "days_required": MIN_OBSERVATIONS, "ready": False}
+
+    json_files = list(ticker_dir.glob("*.json"))
+    days_collected = len(json_files)
+
+    return {
+        "days_collected": days_collected,
+        "days_required": MIN_OBSERVATIONS,
+        "ready": days_collected >= MIN_OBSERVATIONS,
+        "progress_pct": min(100, int((days_collected / MIN_OBSERVATIONS) * 100)),
+    }
 
 
 def check_baseline_exists(ticker: str) -> dict | None:
@@ -245,7 +266,7 @@ def render_regime_badge(label: str, confidence: float) -> None:
     )
 
 
-def render_feature_bars(features: dict) -> go.Figure:
+def render_feature_bars(features: dict, has_baseline: bool = False) -> go.Figure:
     """Render feature z-scores and percentiles as horizontal bars."""
     # Collect z-score features
     zscore_features = {
@@ -273,6 +294,30 @@ def render_feature_bars(features: dict) -> go.Figure:
 
     names = list(all_features.keys())
     values = list(all_features.values())
+
+    # Check if all values are near zero (no meaningful z-scores)
+    all_near_zero = all(abs(v) < 0.1 for v in values)
+
+    if all_near_zero and not has_baseline:
+        # Show placeholder chart with message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Z-scores unavailable<br><br>Collecting baseline data...<br>See raw values below",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=14, color="gray"),
+            align="center",
+        )
+        fig.update_layout(
+            title="Feature Z-Scores (Pending Baseline)",
+            height=300,
+            margin=dict(l=20, r=20, t=40, b=20),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+        )
+        return fig
+
     colors = ["#f44336" if v < 0 else "#4CAF50" for v in values]
 
     fig = go.Figure(
@@ -380,6 +425,7 @@ def render_data_display(data: dict, baseline_info: dict | None = None) -> None:
     st.info(data["regime"]["explanation"])
 
     # Check if we have meaningful z-scores or percentiles
+    has_baseline = baseline_info is not None and baseline_info.get("exists", False)
     zscore_values = [v for k, v in data["features"].items() if k.endswith("_zscore") and v is not None]
     # Percentiles: meaningful if they deviate from 50 (median)
     pct_values = [v for k, v in data["features"].items() if k.endswith("_pct") and k != "price_change_pct" and v is not None]
@@ -394,11 +440,37 @@ def render_data_display(data: dict, baseline_info: dict | None = None) -> None:
                 f"({baseline_info.get('lookback_days', 63)} day lookback)."
             )
         else:
-            # No baseline - need to compute one
-            st.warning(
-                "⚠️ No baseline found for this ticker. Z-scores cannot be computed accurately. "
-                "Run `python scripts/compute_baseline.py <TICKER>` to establish baseline."
-            )
+            # No baseline - show collection progress with prominent raw data
+            collection = get_data_collection_status(data["ticker"])
+            days = collection["days_collected"]
+            required = collection["days_required"]
+            if days > 0:
+                st.warning(
+                    f"📊 **Collecting baseline data: {days}/{required} days** ({collection.get('progress_pct', 0)}%)\n\n"
+                    f"Z-scores require {required}+ days of historical data to establish 'normal' levels. "
+                    f"Continue running the daily pipeline to collect more data."
+                )
+            else:
+                st.warning(
+                    "⚠️ No baseline data. Z-scores cannot be computed without historical reference.\n\n"
+                    "Run `python scripts/run_daily.py <TICKER>` daily to collect data for baseline."
+                )
+
+            # Show prominent raw data section when no z-scores available
+            st.subheader("📈 Today's Raw Metrics")
+            raw_c1, raw_c2, raw_c3, raw_c4 = st.columns(4)
+            with raw_c1:
+                gex = data['features'].get('gex_raw') or 0
+                st.metric("GEX (Gamma)", f"{gex:,.0f}", help="Net gamma exposure")
+            with raw_c2:
+                dex = data['features'].get('dex_raw') or 0
+                st.metric("DEX (Delta)", f"{dex:,.0f}", help="Net delta exposure")
+            with raw_c3:
+                dp = data['features'].get('dark_pool_ratio_raw') or 0
+                st.metric("Dark Pool %", f"{dp:.1f}%", help="Dark pool volume ratio")
+            with raw_c4:
+                blocks = data['features'].get('block_trade_count_raw') or 0
+                st.metric("Block Trades", f"{int(blocks)}", help="Institutional block trades")
 
     # Two columns: Drivers + Features
     col1, col2 = st.columns(2)
@@ -424,8 +496,9 @@ def render_data_display(data: dict, baseline_info: dict | None = None) -> None:
 
     with col2:
         # Always show z-score chart
+        has_baseline = baseline_info is not None and baseline_info.get("exists", False)
         st.plotly_chart(
-            render_feature_bars(data["features"]),
+            render_feature_bars(data["features"], has_baseline=has_baseline),
             use_container_width=True,
         )
 
@@ -495,12 +568,22 @@ def main():
             max_value=date.today(),
         )
 
-        # Check baseline status for selected ticker
+        # Check baseline and data collection status
         baseline_status = check_baseline_exists(ticker)
+        collection_status = get_data_collection_status(ticker)
+
         if baseline_status and baseline_status.get("exists"):
             st.success(f"✅ Baseline: {baseline_status.get('baseline_date', 'available')}")
         else:
             st.error("❌ No baseline")
+            # Show collection progress
+            days = collection_status["days_collected"]
+            required = collection_status["days_required"]
+            pct = collection_status.get("progress_pct", 0)
+            st.progress(pct / 100, text=f"Data: {days}/{required} days ({pct}%)")
+            if days < required:
+                remaining = required - days
+                st.caption(f"{remaining} more days needed for baseline")
 
         st.divider()
 
@@ -527,12 +610,15 @@ def main():
     # Try to load real data
     data = load_real_data(ticker, selected_date)
     baseline_info = check_baseline_exists(ticker)
+    collection_status = get_data_collection_status(ticker)
 
     if data:
         if baseline_info and baseline_info.get("exists"):
             st.success(f"✅ Real data loaded | Baseline: {baseline_info.get('baseline_date', 'available')}")
         else:
-            st.success("✅ Real data loaded from pipeline")
+            days = collection_status["days_collected"]
+            required = collection_status["days_required"]
+            st.info(f"✅ Data loaded | 📊 Baseline progress: {days}/{required} days")
         render_data_display(data, baseline_info)
     else:
         render_no_data_state(ticker, selected_date)

@@ -1,0 +1,19 @@
+[Unit]
+Description=OBSIDIAN MM Daily Data Collection
+After=network.target
+
+[Service]
+Type=oneshot
+User=obsidian
+Group=obsidian
+WorkingDirectory=/opt/obsidian_mm
+Environment="PATH=/opt/obsidian_mm/.venv/bin"
+ExecStart=/opt/obsidian_mm/.venv/bin/python scripts/run_daily.py SPY QQQ IWM DIA
+StandardOutput=append:/opt/obsidian_mm/logs/daily.log
+StandardError=append:/opt/obsidian_mm/logs/daily.log
+
+# Auto-compute baseline when enough data collected
+ExecStartPost=/bin/bash -c 'DAYS=$(ls -1 /opt/obsidian_mm/data/processed/feature_history/SPY/*.json 2>/dev/null | wc -l); if [ "$DAYS" -ge 21 ]; then /opt/obsidian_mm/.venv/bin/python scripts/compute_baseline.py SPY QQQ IWM DIA --local-only --force; fi'
+
+[Install]
+WantedBy=multi-user.target
