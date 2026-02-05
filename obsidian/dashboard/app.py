@@ -392,7 +392,7 @@ def render_data_display(data: dict, baseline_info: dict | None = None) -> None:
     with col1:
         st.plotly_chart(
             render_score_gauge(data["unusualness"]["score"]),
-            use_container_width=True,
+            width="stretch",
         )
 
     with col2:
@@ -499,7 +499,7 @@ def render_data_display(data: dict, baseline_info: dict | None = None) -> None:
         has_baseline = baseline_info is not None and baseline_info.get("exists", False)
         st.plotly_chart(
             render_feature_bars(data["features"], has_baseline=has_baseline),
-            use_container_width=True,
+            width="stretch",
         )
 
     # Show raw values section (always visible for reference)
